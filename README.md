@@ -1,4 +1,4 @@
-# ML Play Store — EDA + Baseline
+# ML Play Store
 
 Proyecto de ML con CRISP-DM sobre el dataset de Google Play (Kaggle).
 Este repo contiene:
