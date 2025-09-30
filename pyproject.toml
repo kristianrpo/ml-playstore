@@ -15,6 +15,7 @@ scikit-learn = "^1.5"
 seaborn = "^0.13"
 jupyterlab = "^4.2"
 ipykernel = "^6.29"
+kagglehub = "^0.3.13"
 
 [tool.poetry.group.dev.dependencies]
 nbstripout = "^0.7"
