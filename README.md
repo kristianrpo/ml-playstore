@@ -69,7 +69,6 @@ En Jupyter selecciona el kernel **Python (ml-playstore)** y abre `notebooks/01_e
 │   ├── entrega1.tex
 │   ├── entrega1.pdf
 │   └── references.bib
-├── src/
 ├── pyproject.toml
 ├── README.md
 └── .gitignore
