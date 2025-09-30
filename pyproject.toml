@@ -1,0 +1,25 @@
+[tool.poetry]
+name = "ml-playstore"
+version = "0.1.0"
+description = "Machine Learning project with Google Play Store database. CRISP-DM Methodology"
+authors = ["Kristian Restrepo Osorio <krestrepoo@eafit.edu.co>", "Sebastian Restrepo Ortiz <srestrep74@eafit.edu.co>"]
+readme = "README.md"
+packages = [{include = "src"}]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+numpy = "^1.26"
+pandas = "^2.2"
+matplotlib = "^3.9"
+scikit-learn = "^1.5"
+seaborn = "^0.13"
+jupyterlab = "^4.2"
+ipykernel = "^6.29"
+
+[tool.poetry.group.dev.dependencies]
+nbstripout = "^0.7"
+jupytext = "^1.16"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
