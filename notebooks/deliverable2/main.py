@@ -224,8 +224,8 @@ if __name__ == "__main__":
     print(" GUARDANDO RESULTADOS ".center(80))
     print("=" * 80)
     
-    # Guardar comparación y resumen
-    training_pipeline.save_results(output_dir='.')
+    # Guardar comparación y resumen en la carpeta de outputs del deliverable
+    training_pipeline.save_results(output_dir=outputs_dir)
     
     # Guardar predicciones de test
     test_results = pd.DataFrame({
