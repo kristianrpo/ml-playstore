@@ -52,19 +52,32 @@ def prepare_data_for_training(train, val, test, target_col='Rating'):
     val = val.copy()
     test = test.copy()
 
-
-    # Seleccionar solo columnas numéricas (evitar columnas tipo object como 'App')
-    train_num = [c for c in train.select_dtypes(include=[np.number]).columns.tolist()]
-    # Excluir la columna target si está en la lista
-    if target_col in train_num:
-        train_num.remove(target_col)
-
-    # Mantener solo features que también estén presentes en val y test
-    common_features = [c for c in train_num if c in val.columns and c in test.columns]
-
+    # Verificar que la columna target existe en todos los datasets
+    for dataset_name, dataset in [('train', train), ('val', val), ('test', test)]:
+        if target_col not in dataset.columns:
+            raise ValueError(f'Target column "{target_col}" not found in {dataset_name} dataset')
+    
+    # Obtener todas las columnas numéricas de train
+    numeric_columns = train.select_dtypes(include=[np.number]).columns.tolist()
+    
+    # Excluir la columna target y la columna 'App' si existe
+    feature_columns = [col for col in numeric_columns 
+                      if col != target_col and col != 'App']
+    
+    # Verificar que las columnas features existen en val y test
+    common_features = [col for col in feature_columns 
+                      if col in val.columns and col in test.columns]
+    
     if len(common_features) == 0:
-        raise ValueError('No numeric common features found in train/val/test. Revisa el preprocesamiento.')
-
+        raise ValueError('No common numeric features found in train/val/test. Revisa el preprocesamiento.')
+    
+    # Verificar que no hay columnas no numéricas en las features
+    non_numeric_features = [col for col in common_features 
+                           if not pd.api.types.is_numeric_dtype(train[col])]
+    if non_numeric_features:
+        raise ValueError(f'Non-numeric features found: {non_numeric_features}')
+    
+    # Crear X e y para cada dataset
     X_train = train[common_features]
     y_train = train[target_col]
 
@@ -73,6 +86,12 @@ def prepare_data_for_training(train, val, test, target_col='Rating'):
 
     X_test = test[common_features]
     y_test = test[target_col]
+    
+    # Verificaciones finales
+    print(f"Features seleccionadas ({len(common_features)}): {common_features}")
+    print(f"X_train shape: {X_train.shape}")
+    print(f"y_train shape: {y_train.shape}")
+    print(f"Target column: {target_col}")
     
     return X_train, y_train, X_val, y_val, X_test, y_test
 
@@ -162,13 +181,13 @@ if __name__ == "__main__":
     #     verbose=True
     # )
     
-    # Opción 2: Entrenar solo árboles y boosting
+    # Opción 2: Entrenar todas las familias (recomendado para mejor rendimiento)
     training_pipeline = ModelTrainingPipeline(
-        cv_folds=3,
+        cv_folds=5,  # Aumentar CV folds para mejor validación
         random_state=42,
         n_jobs=-1,
         verbose=True,
-        families=['trees']  # 'svm', 'trees', 'boosting'
+        families=['trees']
     )
     
     # Otras opciones:

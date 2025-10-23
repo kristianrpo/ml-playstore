@@ -769,6 +769,7 @@ class FeatureEngineer(BaseEstimator, TransformerMixin):
         self.installs_max = None
         self.reviews_min = None
         self.reviews_max = None
+        self._is_fitted = False
     
     def fit(self, X, y=None):
         """Calcula estadísticas solo de train para normalización"""
@@ -777,14 +778,66 @@ class FeatureEngineer(BaseEstimator, TransformerMixin):
         self.reviews_min = X['Reviews'].min()
         self.reviews_max = X['Reviews'].max()
         
+        # Calcular quantiles para popularity_tier (evitar data leakage)
+        self.installs_quantiles = [0] + X['Installs Numeric'].quantile([0.2, 0.4, 0.6, 0.8, 1.0]).tolist()
+        
+        # Calcular quantiles para days_since_update (evitar data leakage)
+        # Primero procesar fechas para obtener days_since_update
+        temp_df = X.copy()
+        temp_df['Last Updated Parsed'] = temp_df['Last Updated'].apply(self._parse_date_flexible)
+        temp_df['days_since_update'] = (self.reference_date - temp_df['Last Updated Parsed']).dt.days
+        valid_days = temp_df['days_since_update'].dropna()
+        
+        if len(valid_days) > 0:
+            percentiles = [0, 0.2, 0.4, 0.6, 0.8, 0.95, 1.0]
+            self.days_quantiles = valid_days.quantile(percentiles).tolist()
+            self.days_quantiles[0] = -1  # Para incluir valores negativos
+            self.days_quantiles[-1] = 10000  # Para valores muy altos
+        else:
+            # Fallback con bins fijos
+            self.days_quantiles = [-1, 30, 90, 365, 730, 10000]
+        
         if self.verbose:
             print(f"\n✓ Estadísticas de train almacenadas para normalización:")
             print(f"  Installs: [{self.installs_min:.0f}, {self.installs_max:.0f}]")
             print(f"  Reviews: [{self.reviews_min:.0f}, {self.reviews_max:.0f}]")
-        
+            print(f"  Installs quantiles: {self.installs_quantiles}")
+            print(f"  Days quantiles: {self.days_quantiles}")
+
+        self._is_fitted = True
         return self
     
+    def _parse_date_flexible(self, date_str):
+        """Método auxiliar para parsear fechas con múltiples formatos"""
+        if pd.isna(date_str):
+            return pd.NaT
+        
+        # Intentar diferentes formatos comunes
+        date_formats = [
+            '%B %d, %Y',      # "January 15, 2018"
+            '%b %d, %Y',      # "Jan 15, 2018" 
+            '%d-%b-%y',       # "15-Jan-18"
+            '%Y-%m-%d',       # "2018-01-15"
+            '%m/%d/%Y',       # "01/15/2018"
+            '%d/%m/%Y'        # "15/01/2018"
+        ]
+        
+        for fmt in date_formats:
+            try:
+                return pd.to_datetime(date_str, format=fmt)
+            except:
+                continue
+        
+        # Si ningún formato funciona, usar pd.to_datetime con inferencia
+        try:
+            return pd.to_datetime(date_str, infer_datetime_format=True)
+        except:
+            return pd.NaT
+    
     def transform(self, X):
+        if not self._is_fitted:
+            raise ValueError("Debe llamar fit() antes de transform()")
+
         df = X.copy()
         
         if self.verbose:
@@ -793,14 +846,42 @@ class FeatureEngineer(BaseEstimator, TransformerMixin):
             print("=" * 80)
         
         # ==============================================================================
-        # 1. RATIOS Y MÉTRICAS DERIVADAS
+        # 1. RATIOS Y MÉTRICAS DERIVADAS MEJORADAS
         # ==============================================================================
         if self.verbose:
             print("\nCreando ratios y métricas derivadas...")
             print("-" * 80)
         
+        # Ratios básicos
         df['review_rate'] = df['Reviews'] / (df['Installs Numeric'] + 1)
         df['size_per_install'] = df['Size'] / (df['Installs Numeric'] + 1)
+        
+        # CORREGIDO: usar max de train para evitar data leakage
+        df['market_penetration'] = df['Installs Numeric'] / self.installs_max
+
+        
+        # Métricas de competitividad
+        df['price_competitiveness'] = 1 / (df['Price'] + 0.01)  # Inverso del precio
+        
+        # Features de temporalidad mejoradas (se crearán después del procesamiento de fechas)
+        
+        # Features de categorización avanzada
+        df['is_premium_category'] = df['Category'].isin(['FINANCE', 'PRODUCTIVITY', 'BUSINESS']).astype(int)
+        df['is_entertainment_category'] = df['Category'].isin(['GAME', 'ENTERTAINMENT', 'SOCIAL']).astype(int)
+        df['is_utility_category'] = df['Category'].isin(['TOOLS', 'COMMUNICATION', 'PHOTOGRAPHY']).astype(int)
+        
+        # Features de tamaño relativo
+        df['size_category'] = pd.cut(df['Size'], 
+                                   bins=[0, 10, 50, 100, 1000, float('inf')], 
+                                   labels=['Tiny', 'Small', 'Medium', 'Large', 'Huge'])
+        
+        # Features de popularidad relativa - CORREGIDO: usar estadísticas de train
+        df['popularity_tier'] = pd.cut(
+            df['Installs Numeric'], 
+            bins=self.installs_quantiles, 
+            labels=['Very Low', 'Low', 'Medium', 'High', 'Very High'],
+            include_lowest=True
+        )
         
         if self.verbose:
             print(f"✓ review_rate: Media {df['review_rate'].mean():.6f}")
@@ -814,17 +895,27 @@ class FeatureEngineer(BaseEstimator, TransformerMixin):
             print("Procesando fecha de actualización...")
             print("-" * 80)
         
-        df['Last Updated Parsed'] = pd.to_datetime(df['Last Updated'], errors='coerce')
+        df['Last Updated Parsed'] = df['Last Updated'].apply(self._parse_date_flexible)
         df['days_since_update'] = (self.reference_date - df['Last Updated Parsed']).dt.days
+        
+        # CORREGIDO: Usar bins predefinidos para evitar data leakage
+        # No usar estadísticas del dataset actual
         df['update_recency'] = pd.cut(
             df['days_since_update'],
-            bins=[-1, 30, 90, 180, 365, 730, 10000],
-            labels=['<1 month', '1-3 months', '3-6 months', '6-12 months', '1-2 years', '>2 years']
-        )
+            bins=self.days_quantiles,
+            labels=['Very Recent', 'Recent', 'Moderate', 'Old', 'Very Old', 'Ancient'],
+            include_lowest=True
+        ) 
+        
+        # Añadir features de temporalidad después del procesamiento de fechas
+        df['is_recently_updated'] = (df['days_since_update'] <= 90).astype(int)
+        df['update_frequency_score'] = 1 / (df['days_since_update'] + 1)  # Más reciente = mayor score
         
         if self.verbose:
             print(f"✓ days_since_update: Media {df['days_since_update'].mean():.0f} días")
             print(f"✓ update_recency creada (6 categorías)")
+            print(f"✓ is_recently_updated: {df['is_recently_updated'].sum()} apps recientes")
+            print(f"✓ update_frequency_score: Media {df['update_frequency_score'].mean():.6f}")
         
         # ==============================================================================
         # 3. POPULARITY SCORE (normalizado con estadísticas de train)
@@ -969,7 +1060,7 @@ class MutualInfoSelector(BaseEstimator, TransformerMixin):
     - Genera visualización de importancia
     """
     
-    def __init__(self, target='Rating', mi_threshold=0.01, random_state=42, verbose=True, plot=False):
+    def __init__(self, target='Rating', mi_threshold=0.005, random_state=42, verbose=True, plot=False):
         self.target = target
         self.mi_threshold = mi_threshold
         self.random_state = random_state
@@ -1085,7 +1176,7 @@ class MulticollinearityRemover(BaseEstimator, TransformerMixin):
         # Seleccionar solo variables numéricas
         numeric_cols = [col for col in X.columns if pd.api.types.is_numeric_dtype(X[col])]
         
-        # Calcular matriz de correlación
+        # CORREGIDO: Calcular matriz de correlación SOLO con train
         self.corr_matrix = X[numeric_cols].corr(method='pearson')
         
         # Identificar pares con alta correlación
@@ -1234,7 +1325,7 @@ class GooglePlayDataPreparationPipeline:
                  test_size=0.30,
                  val_size=0.50,
                  category_threshold=70,
-                 mi_threshold=0.01,
+                 mi_threshold=0.005,
                  corr_threshold=0.8,
                  vars_to_remove=None,
                  reference_date='2025-10-02',

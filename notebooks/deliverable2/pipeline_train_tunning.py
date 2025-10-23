@@ -15,6 +15,7 @@ from sklearn.ensemble import (
 )
 from xgboost import XGBRegressor
 from lightgbm import LGBMRegressor
+import lightgbm as lgb
 import matplotlib.pyplot as plt
 import seaborn as sns
 
@@ -253,9 +254,9 @@ class TreeFamily(BaseEstimator):
             print("-" * 80)
         
         param_grid_dt = {
-            'max_depth': [5, 10, 15, 20, None],
-            'min_samples_split': [2, 5, 10],
-            'min_samples_leaf': [1, 2, 4]
+            'max_depth': [3, 5, 8, 10],  # Limitar profundidad
+            'min_samples_split': [10, 20, 50],  # Más regularización
+            'min_samples_leaf': [5, 10, 20]  # Más regularización
         }
         
         if self.verbose:
@@ -310,14 +311,18 @@ class TreeFamily(BaseEstimator):
         
         param_grid_rf = {
             'n_estimators': [50, 100, 200],
-            'max_depth': [10, 15, 20, None],
-            'min_samples_split': [2, 5, 10]
+            'max_depth': [5, 10, 15],  # Limitar profundidad para evitar overfitting
+            'min_samples_split': [10, 20, 50],  # Más regularización
+            'min_samples_leaf': [5, 10, 20],  # Más regularización
+            'max_features': ['sqrt', 'log2']  # Regularización de features
         }
         
         if self.verbose:
             total_rf = (len(param_grid_rf['n_estimators']) * 
                        len(param_grid_rf['max_depth']) * 
-                       len(param_grid_rf['min_samples_split']))
+                       len(param_grid_rf['min_samples_split']) *
+                       len(param_grid_rf['min_samples_leaf']) *
+                       len(param_grid_rf['max_features']))
             print(f"  Combinaciones: {total_rf}")
         
         start_time = time.time()
@@ -480,15 +485,21 @@ class BoostingFamily(BaseEstimator):
             print("-" * 80)
         
         param_grid_gb = {
-            'learning_rate': [0.01, 0.05, 0.1],
-            'n_estimators': [100, 200, 300],
-            'max_depth': [3, 5, 7]
+            'learning_rate': [0.01, 0.05],  # Reducir opciones
+            'n_estimators': [50, 100, 150],  # Reducir para evitar overfitting
+            'max_depth': [2, 3, 4],  # Reducir profundidad
+            'subsample': [0.7, 0.8],  # Añadir regularización
+            'min_samples_split': [10, 20],  # Añadir regularización
+            'min_samples_leaf': [5, 10]  # Añadir regularización
         }
         
         if self.verbose:
             total_gb = (len(param_grid_gb['learning_rate']) * 
                        len(param_grid_gb['n_estimators']) * 
-                       len(param_grid_gb['max_depth']))
+                       len(param_grid_gb['max_depth']) *
+                       len(param_grid_gb['subsample']) *
+                       len(param_grid_gb['min_samples_split']) *
+                       len(param_grid_gb['min_samples_leaf']))
             print(f"  Combinaciones: {total_gb}")
         
         start_time = time.time()
@@ -529,50 +540,61 @@ class BoostingFamily(BaseEstimator):
             }
         
         # ====================================================================
-        # XGBOOST
+        # XGBOOST CON GRIDSEARCH
         # ====================================================================
         if self.verbose:
             print("\n[2/3] Entrenando XGBoost...")
             print("-" * 80)
         
-        xgb_params = {
-            'n_estimators': 500,
-            'learning_rate': 0.05,
-            'max_depth': 6,
-            'random_state': self.random_state,
-            'n_jobs': self.n_jobs
+        param_grid_xgb = {
+            'n_estimators': [100, 200],  # Pocas opciones para evitar overfitting
+            'learning_rate': [0.01, 0.05],  # Learning rates conservadores
+            'max_depth': [3, 4],  # Profundidad limitada
+            'subsample': [0.7, 0.8],  # Regularización
+            'colsample_bytree': [0.7, 0.8],  # Regularización
+            'reg_alpha': [0.5, 1.0],  # Regularización L1
+            'reg_lambda': [0.5, 1.0]  # Regularización L2
         }
         
         if self.verbose:
-            print(f"  Parámetros: {xgb_params}")
-            print(f"  Early stopping: 20 rounds")
+            total_xgb = (len(param_grid_xgb['n_estimators']) * 
+                        len(param_grid_xgb['learning_rate']) * 
+                        len(param_grid_xgb['max_depth']) *
+                        len(param_grid_xgb['subsample']) *
+                        len(param_grid_xgb['colsample_bytree']) *
+                        len(param_grid_xgb['reg_alpha']) *
+                        len(param_grid_xgb['reg_lambda']))
+            print(f"  Combinaciones: {total_xgb}")
         
         start_time = time.time()
         
-        xgb_model = XGBRegressor(**xgb_params)
-        xgb_model.fit(
-            X_train_scaled, y_train,
-            eval_set=[(X_val_scaled, y_val)] if X_val_scaled is not None else None,
-            verbose=False
+        xgb_grid = GridSearchCV(
+            XGBRegressor(random_state=self.random_state, n_jobs=self.n_jobs),
+            param_grid_xgb,
+            cv=self.cv_folds,
+            scoring='neg_mean_absolute_error',
+            n_jobs=self.n_jobs,
+            verbose=1 if self.verbose else 0
         )
         
+        xgb_grid.fit(X_train_scaled, y_train)
         xgb_time = time.time() - start_time
         
-        self.models['XGBoost'] = xgb_model
+        self.models['XGBoost'] = xgb_grid.best_estimator_
         
         if self.verbose:
             print(f"  ✓ Completado en {xgb_time:.2f}s")
-            best_iter = xgb_model.best_iteration if hasattr(xgb_model, 'best_iteration') else xgb_params['n_estimators']
-            print(f"  Iteraciones óptimas: {best_iter}")
+            print(f"  Mejores parámetros: {xgb_grid.best_params_}")
+            print(f"  Mejor CV MAE: {-xgb_grid.best_score_:.4f}")
         
         # Evaluar
         if X_val_scaled is not None and y_val is not None:
-            y_pred_val = xgb_model.predict(X_val_scaled)
-            y_pred_train = xgb_model.predict(X_train_scaled)
+            y_pred_val = xgb_grid.predict(X_val_scaled)
+            y_pred_train = xgb_grid.predict(X_train_scaled)
             
             self.results['XGBoost'] = {
-                'model': xgb_model,
-                'best_iteration': best_iter,
+                'model': xgb_grid.best_estimator_,
+                'best_params': xgb_grid.best_params_,
                 'mae_val': mean_absolute_error(y_val, y_pred_val),
                 'rmse_val': np.sqrt(mean_squared_error(y_val, y_pred_val)),
                 'r2_val': r2_score(y_val, y_pred_val),
@@ -582,43 +604,63 @@ class BoostingFamily(BaseEstimator):
             }
         
         # ====================================================================
-        # LIGHTGBM
+        # LIGHTGBM CON GRIDSEARCH
         # ====================================================================
         if self.verbose:
             print("\n[3/3] Entrenando LightGBM...")
             print("-" * 80)
         
-        lgb_params = {
-            'n_estimators': 300,
-            'learning_rate': 0.05,
-            'max_depth': 7,
-            'random_state': self.random_state,
-            'n_jobs': self.n_jobs,
-            'verbose': -1
+        param_grid_lgb = {
+            'n_estimators': [100, 200],  # Pocas opciones para evitar overfitting
+            'learning_rate': [0.01, 0.05],  # Learning rates conservadores
+            'max_depth': [3, 4],  # Profundidad limitada
+            'subsample': [0.7, 0.8],  # Regularización
+            'colsample_bytree': [0.7, 0.8],  # Regularización
+            'reg_alpha': [0.5, 1.0],  # Regularización L1
+            'reg_lambda': [0.5, 1.0],  # Regularización L2
+            'min_child_samples': [10, 20]  # Regularización
         }
         
         if self.verbose:
-            print(f"  Parámetros: {lgb_params}")
+            total_lgb = (len(param_grid_lgb['n_estimators']) * 
+                        len(param_grid_lgb['learning_rate']) * 
+                        len(param_grid_lgb['max_depth']) *
+                        len(param_grid_lgb['subsample']) *
+                        len(param_grid_lgb['colsample_bytree']) *
+                        len(param_grid_lgb['reg_alpha']) *
+                        len(param_grid_lgb['reg_lambda']) *
+                        len(param_grid_lgb['min_child_samples']))
+            print(f"  Combinaciones: {total_lgb}")
         
         start_time = time.time()
         
-        lgb_model = LGBMRegressor(**lgb_params)
-        lgb_model.fit(X_train_scaled, y_train)
+        lgb_grid = GridSearchCV(
+            LGBMRegressor(random_state=self.random_state, n_jobs=self.n_jobs, verbose=-1),
+            param_grid_lgb,
+            cv=self.cv_folds,
+            scoring='neg_mean_absolute_error',
+            n_jobs=self.n_jobs,
+            verbose=1 if self.verbose else 0
+        )
         
+        lgb_grid.fit(X_train_scaled, y_train)
         lgb_time = time.time() - start_time
         
-        self.models['LightGBM'] = lgb_model
+        self.models['LightGBM'] = lgb_grid.best_estimator_
         
         if self.verbose:
             print(f"  ✓ Completado en {lgb_time:.2f}s")
+            print(f"  Mejores parámetros: {lgb_grid.best_params_}")
+            print(f"  Mejor CV MAE: {-lgb_grid.best_score_:.4f}")
         
         # Evaluar
         if X_val_scaled is not None and y_val is not None:
-            y_pred_val = lgb_model.predict(X_val_scaled)
-            y_pred_train = lgb_model.predict(X_train_scaled)
+            y_pred_val = lgb_grid.predict(X_val_scaled)
+            y_pred_train = lgb_grid.predict(X_train_scaled)
             
             self.results['LightGBM'] = {
-                'model': lgb_model,
+                'model': lgb_grid.best_estimator_,
+                'best_params': lgb_grid.best_params_,
                 'mae_val': mean_absolute_error(y_val, y_pred_val),
                 'rmse_val': np.sqrt(mean_squared_error(y_val, y_pred_val)),
                 'r2_val': r2_score(y_val, y_pred_val),
