@@ -3,7 +3,6 @@ import pandas as pd
 import numpy as np
 import re
 from sklearn.base import BaseEstimator, TransformerMixin
-from sklearn.pipeline import Pipeline
 from sklearn.model_selection import train_test_split
 import warnings
 warnings.filterwarnings('ignore')
@@ -1444,18 +1443,6 @@ class GooglePlayDataPreparationPipeline:
         self.numeric_converter = NumericConverter(verbose=self.verbose)
         df = self.numeric_converter.fit_transform(df)
         
-        # Paso 0.5: Extracción de features de sentiment (OPCIONAL)
-        if self.reviews_sentiment_path is not None:
-            self.sentiment_extractor = SentimentFeatureExtractor(
-                reviews_path=self.reviews_sentiment_path,
-                verbose=self.verbose
-            )
-            df = self.sentiment_extractor.fit_transform(df)
-        else:
-            if self.verbose:
-                print("\n⚠️  Sentiment features NO agregadas (reviews_sentiment_path=None)")
-                print("   Para incluir sentiment, pasar ruta al CSV de reviews")
-        
         # Paso 1: Eliminación de duplicados
         self.duplicate_remover = DuplicateRemover(verbose=self.verbose)
         df = self.duplicate_remover.fit_transform(df)
@@ -1488,6 +1475,31 @@ class GooglePlayDataPreparationPipeline:
         # Paso 5: Imputación sin data leakage
         self.imputer = NoLeakageImputer(verbose=self.verbose)
         train, val, test = self.imputer.fit_transform(train, val, test)
+        
+        # ============================================================================
+        # FASE 3.5: SENTIMENT FEATURES (sin data leakage)
+        # ============================================================================
+        
+        # Paso 5.5: Extracción de features de sentiment DESPUÉS del split
+        if self.reviews_sentiment_path is not None:
+            if self.verbose:
+                print("\n" + "=" * 80)
+                print("PASO 5.5: SENTIMENT FEATURES (SIN DATA LEAKAGE)".center(80))
+                print("=" * 80)
+            
+            self.sentiment_extractor = SentimentFeatureExtractor(
+                reviews_path=self.reviews_sentiment_path,
+                verbose=self.verbose
+            )
+            # fit SOLO con train
+            self.sentiment_extractor.fit(train)
+            # transform a todos
+            train = self.sentiment_extractor.transform(train)
+            val = self.sentiment_extractor.transform(val)
+            test = self.sentiment_extractor.transform(test)
+        else:
+            if self.verbose:
+                print("\n⚠️  Sentiment features NO agregadas (reviews_sentiment_path=None)")
         
         # ============================================================================
         # FASE 4: TRANSFORMACIONES (fit con train, transform a todos)

@@ -20,15 +20,8 @@ Versión: 3.0 - Arquitectura modular con familias configurables
 """
 
 import pandas as pd
-import numpy as np
 from pathlib import Path
 import time
-
-from sklearn.metrics import (
-    accuracy_score, precision_score, recall_score, f1_score,
-    confusion_matrix, classification_report, precision_recall_fscore_support
-)
-import matplotlib.pyplot as plt
 import seaborn as sns
 
 from pipeline_data_preparation import GooglePlayDataPreparationPipeline
