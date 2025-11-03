@@ -16,6 +16,7 @@ venv/
 Thumbs.db
 .vscode/
 .idea/
+.kiro/
 
 # Reporte LaTeX
 report/*.aux
