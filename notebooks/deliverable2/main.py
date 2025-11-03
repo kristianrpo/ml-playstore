@@ -39,6 +39,7 @@ from pipeline_modelation import ClassificationTrainingPipeline
 # ============================================================================
 RANDOM_STATE = 42
 DATA_PATH = '../../data/original/google-play-store/googleplaystore.csv'
+REVIEWS_SENTIMENT_PATH = '../../data/original/google-play-store/googleplaystore_user_reviews.csv'
 OUTPUT_DIR = Path('./outputs')
 
 # CONFIGURAR AQUÍ QUÉ FAMILIAS ENTRENAR
@@ -100,7 +101,8 @@ else:
         reference_date='2025-10-02',
         random_state=RANDOM_STATE,
         verbose=True,
-        plot=False
+        plot=False,
+        reviews_sentiment_path=REVIEWS_SENTIMENT_PATH  # ✅ AGREGADO: sentiment features
     )
     
     train, val, test = data_pipeline.fit_transform(df)

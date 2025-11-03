@@ -8,6 +8,9 @@ from sklearn.model_selection import train_test_split
 import warnings
 warnings.filterwarnings('ignore')
 
+# Importar extractor de sentiment features
+from sentiment_features import SentimentFeatureExtractor
+
 
 # ============================================================================
 # TRANSFORMADOR 1: CONVERSIÓN DE COLUMNAS NUMÉRICAS
@@ -1366,7 +1369,8 @@ class GooglePlayDataPreparationPipeline:
                  reference_date='2025-10-02',
                  random_state=42,
                  verbose=True,
-                 plot=False):
+                 plot=False,
+                 reviews_sentiment_path=None):
         """
         Inicializa el pipeline con todos sus parámetros.
         
@@ -1381,6 +1385,7 @@ class GooglePlayDataPreparationPipeline:
             random_state: Semilla aleatoria
             verbose: Mostrar mensajes detallados
             plot: Generar visualizaciones
+            reviews_sentiment_path: Ruta al CSV de reviews con sentiment (opcional)
         """
         self.test_size = test_size
         self.val_size = val_size
@@ -1392,9 +1397,11 @@ class GooglePlayDataPreparationPipeline:
         self.random_state = random_state
         self.verbose = verbose
         self.plot = plot
+        self.reviews_sentiment_path = reviews_sentiment_path
         
         # Componentes del pipeline
         self.numeric_converter = None
+        self.sentiment_extractor = None
         self.duplicate_remover = None
         self.impossible_values_remover = None
         self.consistency_validator = None
@@ -1436,6 +1443,18 @@ class GooglePlayDataPreparationPipeline:
         # Paso 0: Conversión de columnas numéricas
         self.numeric_converter = NumericConverter(verbose=self.verbose)
         df = self.numeric_converter.fit_transform(df)
+        
+        # Paso 0.5: Extracción de features de sentiment (OPCIONAL)
+        if self.reviews_sentiment_path is not None:
+            self.sentiment_extractor = SentimentFeatureExtractor(
+                reviews_path=self.reviews_sentiment_path,
+                verbose=self.verbose
+            )
+            df = self.sentiment_extractor.fit_transform(df)
+        else:
+            if self.verbose:
+                print("\n⚠️  Sentiment features NO agregadas (reviews_sentiment_path=None)")
+                print("   Para incluir sentiment, pasar ruta al CSV de reviews")
         
         # Paso 1: Eliminación de duplicados
         self.duplicate_remover = DuplicateRemover(verbose=self.verbose)

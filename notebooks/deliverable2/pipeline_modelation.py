@@ -1620,7 +1620,7 @@ class ClassificationTrainingPipeline(BaseEstimator):
         Returns:
             float: Threshold óptimo
         """
-        thresholds = np.arange(0.05, 0.85, 0.025)  # Rango más amplio y fino (era 0.1-0.9 con 0.05)
+        thresholds = np.arange(0.60, 0.95, 0.01)  # Rango alto para favorecer precision (0.60-0.95)
         best_score = -1
         best_threshold = 0.5
         
