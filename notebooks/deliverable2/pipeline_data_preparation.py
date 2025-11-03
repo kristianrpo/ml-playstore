@@ -1,6 +1,7 @@
 
 import pandas as pd
 import numpy as np
+import re
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.pipeline import Pipeline
 from sklearn.model_selection import train_test_split
@@ -357,12 +358,17 @@ class StratifiedSplitter:
             print("Dividiendo dataset (estratificado por Rating)...")
             print("-" * 80)
         
-        # Crear bins de Rating para estratificación más robusta
+        # Crear bins de Rating para estratificación ALINEADA con clasificación binaria
+        # Umbral en 4.0 para coincidir con target de clasificación: Low (≤4.0) vs High (>4.0)
         df_model['rating_bin'] = pd.cut(
             df_model['Rating'], 
-            bins=[0, 3, 4, 4.5, 5], 
-            labels=['Low', 'Medium', 'High', 'VeryHigh']
+            bins=[0, 4.0, 5], 
+            labels=['Low', 'High']
         )
+        
+        if self.verbose:
+            print(f"\nDistribución para estratificación (Rating ≤4.0 = Low, >4.0 = High):")
+            print(df_model['rating_bin'].value_counts(normalize=True).mul(100).round(1))
         
         train, temp = train_test_split(
             df_model,
@@ -869,19 +875,28 @@ class FeatureEngineer(BaseEstimator, TransformerMixin):
         df['is_premium_category'] = df['Category'].isin(['FINANCE', 'PRODUCTIVITY', 'BUSINESS']).astype(int)
         df['is_entertainment_category'] = df['Category'].isin(['GAME', 'ENTERTAINMENT', 'SOCIAL']).astype(int)
         df['is_utility_category'] = df['Category'].isin(['TOOLS', 'COMMUNICATION', 'PHOTOGRAPHY']).astype(int)
+
+        # Features del nombre de la app (señal ligera y barata)
+        if 'App' in df.columns:
+            app_series = df['App'].astype(str)
+            df['app_name_length'] = app_series.str.len().fillna(0).astype(int)
+            df['app_name_word_count'] = app_series.str.split().str.len().fillna(0).astype(int)
+            # Presencia de dígitos en el nombre
+            df['app_name_has_digit'] = app_series.str.contains(r"\d", regex=True).fillna(False).astype(int)
         
         # Features de tamaño relativo
-        df['size_category'] = pd.cut(df['Size'], 
-                                   bins=[0, 10, 50, 100, 1000, float('inf')], 
-                                   labels=['Tiny', 'Small', 'Medium', 'Large', 'Huge'])
+        # Eliminado: 'size_category' (baja importancia en clasificación binaria)
+        # Anteriormente: pd.cut(Size) -> ['Tiny','Small','Medium','Large','Huge']
+        # df['size_category'] = pd.cut(df['Size'], bins=[0, 10, 50, 100, 1000, float('inf')], labels=['Tiny', 'Small', 'Medium', 'Large', 'Huge'])
         
         # Features de popularidad relativa - CORREGIDO: usar estadísticas de train
-        df['popularity_tier'] = pd.cut(
-            df['Installs Numeric'], 
-            bins=self.installs_quantiles, 
-            labels=['Very Low', 'Low', 'Medium', 'High', 'Very High'],
-            include_lowest=True
-        )
+        # Eliminado: 'popularity_tier' (baja importancia y redundante con Installs_log/popularity_score)
+        # df['popularity_tier'] = pd.cut(
+        #     df['Installs Numeric'], 
+        #     bins=self.installs_quantiles, 
+        #     labels=['Very Low', 'Low', 'Medium', 'High', 'Very High'],
+        #     include_lowest=True
+        # )
         
         if self.verbose:
             print(f"✓ review_rate: Media {df['review_rate'].mean():.6f}")
@@ -932,6 +947,22 @@ class FeatureEngineer(BaseEstimator, TransformerMixin):
         if self.verbose:
             print(f"✓ popularity_score: Media {df['popularity_score'].mean():.2f}")
         
+        # 3.1 ANDROID VERSION: extraer versión mínima como número y flag >= 4.1
+        if 'Android Ver' in df.columns:
+            def _extract_android_min(v):
+                if pd.isna(v):
+                    return np.nan
+                # Buscar primer número tipo 4, 4.1, 5.0
+                m = re.search(r"(\d+(?:\.\d+)?)", str(v))
+                if m:
+                    try:
+                        return float(m.group(1))
+                    except:
+                        return np.nan
+                return np.nan
+            df['android_min_version'] = df['Android Ver'].apply(_extract_android_min).fillna(0.0)
+            df['android_ge_4_1'] = (df['android_min_version'] >= 4.1).fillna(False).astype(int)
+
         # ==============================================================================
         # 4. ELIMINAR COLUMNAS REDUNDANTES
         # ==============================================================================
@@ -943,7 +974,11 @@ class FeatureEngineer(BaseEstimator, TransformerMixin):
         redundant_cols = [
             'Reviews', 'Installs Numeric', 'Size', 'Installs', 'Genres', 
             'Last Updated', 'Last Updated Parsed', 'Current Ver', 'Android Ver', 
-            'days_since_update'
+            'days_since_update',
+            # Eliminaciones para simplificar y evitar dummies de baja señal
+            'Type',               # reemplazado por is_free (binaria)
+            'size_category',      # baja importancia
+            'popularity_tier'     # baja importancia
         ]
         
         cols_to_drop = [col for col in redundant_cols if col in df.columns]

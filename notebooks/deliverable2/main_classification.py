@@ -160,29 +160,18 @@ if __name__ == "__main__":
     print("-" * 80)
     
     # Inicializar pipeline
-    # Clasificación binaria: Rating > 4.3 (High) vs Rating ≤ 4.3 (Low)
+    # Clasificación binaria: Rating > 4.0 (High) vs Rating ≤ 4.0 (Low)
     classification_pipeline = ClassificationTrainingPipeline(
         n_bins=2,  # 2 categorías: Low (≤4.3) y High (>4.3)
-        binning_strategy='custom',  # Usar umbral personalizado en 4.3
+        binning_strategy='custom',  # Usar umbral personalizado en 4.0
         cv_folds=5,
         random_state=42,
         n_jobs=-1,
         verbose=True,
-        families=['trees', 'boosting'],  # Solo árboles y boosting (más rápido)
-        custom_bins=[0, 4.3, 5.1],  # Umbral en 4.3
+        families=['boosting', 'trees', 'knn'],  # Solo árboles y boosting (más rápido)
+        custom_bins=[0, 4, 5.1],  # Umbral en 4.0
         custom_labels=['Low', 'High']  # Etiquetas personalizadas
     )
-    
-    # Opción 2: Entrenar solo algunas familias (más rápido)
-    # classification_pipeline = ClassificationTrainingPipeline(
-    #     n_bins=5,
-    #     binning_strategy='quantile',
-    #     cv_folds=5,
-    #     random_state=42,
-    #     n_jobs=-1,
-    #     verbose=True,
-    #     families=['trees', 'boosting']  # Solo árboles y boosting
-    # )
     
     # Entrenar todos los modelos
     classification_pipeline.fit(X_train, y_train, X_val, y_val)
@@ -205,10 +194,68 @@ if __name__ == "__main__":
     
     # Transformar target de test a categorías
     y_test_cat = classification_pipeline.target_transformer.transform(y_test)
+    # Transformar target de validación a categorías (para calibración de umbral)
+    y_val_cat = classification_pipeline.target_transformer.transform(y_val)
     
     # Predicciones en test
     y_pred_test = classification_pipeline.predict(X_test, family='best')
     y_proba_test = classification_pipeline.predict_proba(X_test, family='best')
+
+    # Calibración de umbral (solo binaria): optimiza F1_macro en validación
+    calibrated_threshold = None
+    calibrated_metrics = None
+    y_pred_test_calibrated = None
+    if len(classification_pipeline.target_transformer.labels) == 2:
+        # Probabilidades en validación para la clase 1 (High)
+        y_proba_val = classification_pipeline.predict_proba(X_val, family='best')
+        proba_high_val = y_proba_val[:, 1]
+
+        def sweep_best_threshold(proba, y_true, metric='f1_macro'):
+            thresholds = np.linspace(0.3, 0.7, 21)
+            best_t, best_score = 0.5, -1.0
+            for t in thresholds:
+                y_pred_t = (proba >= t).astype(int)
+                score = f1_score(y_true, y_pred_t, average='macro', zero_division=0)
+                if score > best_score:
+                    best_score, best_t = score, t
+            return best_t, best_score
+
+        calibrated_threshold, best_val_macro = sweep_best_threshold(proba_high_val, y_val_cat)
+
+        # Aplicar umbral calibrado a test
+        proba_high_test = y_proba_test[:, 1]
+        y_pred_test_calibrated = (proba_high_test >= calibrated_threshold).astype(int)
+
+        # Métricas calibradas en val/test
+        accuracy_val_cal = accuracy_score(y_val_cat, (proba_high_val >= calibrated_threshold).astype(int))
+        precision_val_cal = precision_score(y_val_cat, (proba_high_val >= calibrated_threshold).astype(int), average='weighted', zero_division=0)
+        recall_val_cal = recall_score(y_val_cat, (proba_high_val >= calibrated_threshold).astype(int), average='weighted', zero_division=0)
+        f1_val_cal = f1_score(y_val_cat, (proba_high_val >= calibrated_threshold).astype(int), average='weighted', zero_division=0)
+        f1_macro_val_cal = f1_score(y_val_cat, (proba_high_val >= calibrated_threshold).astype(int), average='macro', zero_division=0)
+
+        accuracy_test_cal = accuracy_score(y_test_cat, y_pred_test_calibrated)
+        precision_test_cal = precision_score(y_test_cat, y_pred_test_calibrated, average='weighted', zero_division=0)
+        recall_test_cal = recall_score(y_test_cat, y_pred_test_calibrated, average='weighted', zero_division=0)
+        f1_test_cal = f1_score(y_test_cat, y_pred_test_calibrated, average='weighted', zero_division=0)
+        f1_macro_test_cal = f1_score(y_test_cat, y_pred_test_calibrated, average='macro', zero_division=0)
+
+        calibrated_metrics = {
+            'threshold': calibrated_threshold,
+            'val': {
+                'Accuracy': accuracy_val_cal,
+                'Precision': precision_val_cal,
+                'Recall': recall_val_cal,
+                'F1_weighted': f1_val_cal,
+                'F1_macro': f1_macro_val_cal
+            },
+            'test': {
+                'Accuracy': accuracy_test_cal,
+                'Precision': precision_test_cal,
+                'Recall': recall_test_cal,
+                'F1_weighted': f1_test_cal,
+                'F1_macro': f1_macro_test_cal
+            }
+        }
     
     # Calcular métricas en test
     accuracy_test = accuracy_score(y_test_cat, y_pred_test)
@@ -223,6 +270,12 @@ if __name__ == "__main__":
     print(f"   Recall:          {recall_test:.4f}")
     print(f"   F1-score (weighted): {f1_test:.4f}")
     print(f"   F1-score (macro):    {f1_macro_test:.4f}")
+
+    if calibrated_metrics is not None:
+        print("\n🎯 Umbral calibrado (validación, F1_macro):")
+        print(f"   Threshold óptimo: {calibrated_metrics['threshold']:.3f}")
+        print(f"   Val F1_macro (calibrado): {calibrated_metrics['val']['F1_macro']:.4f}")
+        print(f"   Test F1_macro (calibrado): {calibrated_metrics['test']['F1_macro']:.4f}")
     
     # Comparar val vs test
     print(f"\n📈 Comparación Val vs Test:")
@@ -272,16 +325,29 @@ if __name__ == "__main__":
     test_predictions_fp = outputs_dir / 'test_predictions.csv'
     test_results.to_csv(test_predictions_fp, index=False)
     print(f"   ✓ {test_predictions_fp}")
+
+    # Guardar predicciones calibradas (si aplica)
+    if y_pred_test_calibrated is not None:
+        test_results_cal = pd.DataFrame({
+            'y_true': y_test_cat,
+            'y_pred': y_pred_test_calibrated,
+            'correct': (y_test_cat == y_pred_test_calibrated).astype(int)
+        })
+        for i, label in enumerate(classification_pipeline.target_transformer.labels):
+            test_results_cal[f'proba_{label}'] = y_proba_test[:, i]
+        test_predictions_cal_fp = outputs_dir / 'test_predictions_calibrated.csv'
+        test_results_cal.to_csv(test_predictions_cal_fp, index=False)
+        print(f"   ✓ {test_predictions_cal_fp}")
     
     # Guardar métricas finales
-    final_metrics = pd.DataFrame({
-        'Dataset': ['Val', 'Test'],
-        'Accuracy': [best_info['Accuracy_val'], accuracy_test],
-        'Precision': [best_info['Precision_val'], precision_test],
-        'Recall': [best_info['Recall_val'], recall_test],
-        'F1_weighted': [best_info['F1_weighted_val'], f1_test],
-        'F1_macro': [best_info['F1_macro_val'], f1_macro_test]
-    })
+    rows = [
+        {'Dataset': 'Val', 'Accuracy': best_info['Accuracy_val'], 'Precision': best_info['Precision_val'], 'Recall': best_info['Recall_val'], 'F1_weighted': best_info['F1_weighted_val'], 'F1_macro': best_info['F1_macro_val']},
+        {'Dataset': 'Test', 'Accuracy': accuracy_test, 'Precision': precision_test, 'Recall': recall_test, 'F1_weighted': f1_test, 'F1_macro': f1_macro_test}
+    ]
+    if calibrated_metrics is not None:
+        rows.append({'Dataset': 'Val_calibrated', **calibrated_metrics['val']})
+        rows.append({'Dataset': 'Test_calibrated', **calibrated_metrics['test']})
+    final_metrics = pd.DataFrame(rows)
     final_metrics_fp = outputs_dir / 'final_metrics.csv'
     final_metrics.to_csv(final_metrics_fp, index=False)
     print(f"   ✓ {final_metrics_fp}")
@@ -296,6 +362,17 @@ if __name__ == "__main__":
     cm_fp = outputs_dir / 'confusion_matrix.csv'
     cm_df.to_csv(cm_fp)
     print(f"   ✓ {cm_fp}")
+
+    # Guardar umbral calibrado
+    if calibrated_metrics is not None:
+        with open(outputs_dir / 'threshold_calibration.txt', 'w', encoding='utf-8') as f:
+            f.write(f"Threshold óptimo (Val, F1_macro): {calibrated_metrics['threshold']:.4f}\n")
+            f.write("Métricas calibradas (Val):\n")
+            for k, v in calibrated_metrics['val'].items():
+                f.write(f"  {k}: {v:.4f}\n")
+            f.write("Métricas calibradas (Test):\n")
+            for k, v in calibrated_metrics['test'].items():
+                f.write(f"  {k}: {v:.4f}\n")
     
     # Feature importance (si está disponible)
     if best_info['Familia'] == 'Árboles':

@@ -318,11 +318,11 @@ class TreeClassifierFamily(BaseEstimator):
             print("-" * 80)
         
         param_grid_rf = {
-            'n_estimators': [100, 200],  # Reducido de 3 a 2 opciones
-            'max_depth': [10, None],  # Reducido de 4 a 2 opciones
-            'min_samples_split': [10],  # Reducido de 3 a 1 opción
-            'min_samples_leaf': [5],  # Reducido de 3 a 1 opción
-            'max_features': ['sqrt']  # Reducido de 2 a 1 opción
+            'n_estimators': [100, 150, 200],  # Optimizado: 3 opciones balanceadas
+            'max_depth': [10, 15, 20, None],  # Optimizado: explorar profundidades intermedias
+            'min_samples_split': [10],  # Mantener fijo para reducir combinaciones
+            'min_samples_leaf': [3, 5],  # Optimizado: permitir más flexibilidad
+            'max_features': ['sqrt']  # Mantener fijo para reducir combinaciones
         }
         
         if self.verbose:
