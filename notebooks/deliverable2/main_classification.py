@@ -162,13 +162,13 @@ if __name__ == "__main__":
     # Inicializar pipeline
     # Clasificación binaria: Rating > 4.0 (High) vs Rating ≤ 4.0 (Low)
     classification_pipeline = ClassificationTrainingPipeline(
-        n_bins=2,  # 2 categorías: Low (≤4.3) y High (>4.3)
+        n_bins=2,  # 2 categorías: Low (≤4.0) y High (>4.0)
         binning_strategy='custom',  # Usar umbral personalizado en 4.0
         cv_folds=5,
         random_state=42,
         n_jobs=-1,
         verbose=True,
-        families=['boosting', 'trees', 'knn'],  # Solo árboles y boosting (más rápido)
+        families=['trees','boosting'],  # Boosting y Trees (sin KNN por overfitting)
         custom_bins=[0, 4, 5.1],  # Umbral en 4.0
         custom_labels=['Low', 'High']  # Etiquetas personalizadas
     )
@@ -200,64 +200,92 @@ if __name__ == "__main__":
     # Predicciones en test
     y_pred_test = classification_pipeline.predict(X_test, family='best')
     y_proba_test = classification_pipeline.predict_proba(X_test, family='best')
-
-    # Calibración de umbral (solo binaria): optimiza F1_macro en validación
-    calibrated_threshold = None
-    calibrated_metrics = None
-    y_pred_test_calibrated = None
-    if len(classification_pipeline.target_transformer.labels) == 2:
-        # Probabilidades en validación para la clase 1 (High)
-        y_proba_val = classification_pipeline.predict_proba(X_val, family='best')
-        proba_high_val = y_proba_val[:, 1]
-
-        def sweep_best_threshold(proba, y_true, metric='f1_macro'):
-            thresholds = np.linspace(0.3, 0.7, 21)
-            best_t, best_score = 0.5, -1.0
-            for t in thresholds:
-                y_pred_t = (proba >= t).astype(int)
-                score = f1_score(y_true, y_pred_t, average='macro', zero_division=0)
-                if score > best_score:
-                    best_score, best_t = score, t
-            return best_t, best_score
-
-        calibrated_threshold, best_val_macro = sweep_best_threshold(proba_high_val, y_val_cat)
-
-        # Aplicar umbral calibrado a test
-        proba_high_test = y_proba_test[:, 1]
-        y_pred_test_calibrated = (proba_high_test >= calibrated_threshold).astype(int)
-
-        # Métricas calibradas en val/test
-        accuracy_val_cal = accuracy_score(y_val_cat, (proba_high_val >= calibrated_threshold).astype(int))
-        precision_val_cal = precision_score(y_val_cat, (proba_high_val >= calibrated_threshold).astype(int), average='weighted', zero_division=0)
-        recall_val_cal = recall_score(y_val_cat, (proba_high_val >= calibrated_threshold).astype(int), average='weighted', zero_division=0)
-        f1_val_cal = f1_score(y_val_cat, (proba_high_val >= calibrated_threshold).astype(int), average='weighted', zero_division=0)
-        f1_macro_val_cal = f1_score(y_val_cat, (proba_high_val >= calibrated_threshold).astype(int), average='macro', zero_division=0)
-
-        accuracy_test_cal = accuracy_score(y_test_cat, y_pred_test_calibrated)
-        precision_test_cal = precision_score(y_test_cat, y_pred_test_calibrated, average='weighted', zero_division=0)
-        recall_test_cal = recall_score(y_test_cat, y_pred_test_calibrated, average='weighted', zero_division=0)
-        f1_test_cal = f1_score(y_test_cat, y_pred_test_calibrated, average='weighted', zero_division=0)
-        f1_macro_test_cal = f1_score(y_test_cat, y_pred_test_calibrated, average='macro', zero_division=0)
-
-        calibrated_metrics = {
-            'threshold': calibrated_threshold,
-            'val': {
-                'Accuracy': accuracy_val_cal,
-                'Precision': precision_val_cal,
-                'Recall': recall_val_cal,
-                'F1_weighted': f1_val_cal,
-                'F1_macro': f1_macro_val_cal
-            },
-            'test': {
-                'Accuracy': accuracy_test_cal,
-                'Precision': precision_test_cal,
-                'Recall': recall_test_cal,
-                'F1_weighted': f1_test_cal,
-                'F1_macro': f1_macro_test_cal
-            }
-        }
     
-    # Calcular métricas en test
+    # ========================================================================
+    # CALIBRACIÓN DE THRESHOLD (para mejorar balance Low/High)
+    # ========================================================================
+    print("\n" + "=" * 80)
+    print(" CALIBRACIÓN DE THRESHOLD (Class Weights + Threshold) ".center(80))
+    print("=" * 80)
+    
+    # Obtener probabilidades en validación
+    y_proba_val = classification_pipeline.predict_proba(X_val, family='best')
+    
+    # Buscar el mejor threshold optimizando F1-macro (promedio de ambas clases)
+    print("\n🎯 Buscando threshold óptimo para maximizar F1-macro (promedio de ambas clases)...")
+    
+    from sklearn.metrics import precision_recall_fscore_support
+    
+    thresholds = np.arange(0.3, 0.8, 0.01)  # Rango de thresholds a probar
+    best_threshold = 0.5
+    best_f1_macro = 0.0
+    
+    results = []
+    for thresh in thresholds:
+        # Predicciones con este threshold (clase 1 = High si proba >= thresh)
+        y_pred_val_thresh = (y_proba_val[:, 1] >= thresh).astype(int)
+        
+        # Calcular F1 por clase
+        p, r, f, _ = precision_recall_fscore_support(y_val_cat, y_pred_val_thresh, labels=[0, 1], zero_division=0)
+        
+        # F1-macro es el promedio de F1 de ambas clases
+        f1_macro_current = (f[0] + f[1]) / 2
+        
+        # Guardamos resultados
+        results.append({
+            'threshold': thresh,
+            'f1_low': f[0],
+            'precision_low': p[0],
+            'recall_low': r[0],
+            'f1_high': f[1],
+            'f1_macro': f1_macro_current
+        })
+        
+        # Actualizar mejor threshold si mejora F1-macro
+        if f1_macro_current > best_f1_macro:
+            best_f1_macro = f1_macro_current
+            best_threshold = thresh
+    
+    print(f"   Threshold por defecto: 0.50")
+    print(f"   Threshold óptimo: {best_threshold:.3f}")
+    print(f"   F1-macro (val): {best_f1_macro:.4f}")
+    
+    # Aplicar el threshold óptimo a validación y test
+    y_pred_val_calibrated = (y_proba_val[:, 1] >= best_threshold).astype(int)
+    y_pred_test_calibrated = (y_proba_test[:, 1] >= best_threshold).astype(int)
+    
+    # Métricas con threshold calibrado
+    print("\n📊 Comparación Threshold 0.5 vs Calibrado:")
+    print("\nValidación:")
+    
+    # Métricas con threshold 0.5
+    y_pred_val_default = classification_pipeline.predict(X_val, family='best')
+    p_val_def, r_val_def, f_val_def, _ = precision_recall_fscore_support(y_val_cat, y_pred_val_default, labels=[0, 1], zero_division=0)
+    
+    # Métricas con threshold calibrado
+    p_val_cal, r_val_cal, f_val_cal, _ = precision_recall_fscore_support(y_val_cat, y_pred_val_calibrated, labels=[0, 1], zero_division=0)
+    
+    print(f"   Low  - F1: {f_val_def[0]:.4f} → {f_val_cal[0]:.4f} (Δ={f_val_cal[0]-f_val_def[0]:+.4f})")
+    print(f"   Low  - Precision: {p_val_def[0]:.4f} → {p_val_cal[0]:.4f} (Δ={p_val_cal[0]-p_val_def[0]:+.4f})")
+    print(f"   Low  - Recall: {r_val_def[0]:.4f} → {r_val_cal[0]:.4f} (Δ={r_val_cal[0]-r_val_def[0]:+.4f})")
+    print(f"   High - F1: {f_val_def[1]:.4f} → {f_val_cal[1]:.4f} (Δ={f_val_cal[1]-f_val_def[1]:+.4f})")
+    
+    print("\nTest:")
+    # Métricas en test con threshold calibrado
+    p_test_cal, r_test_cal, f_test_cal, _ = precision_recall_fscore_support(y_test_cat, y_pred_test_calibrated, labels=[0, 1], zero_division=0)
+    p_test_def, r_test_def, f_test_def, _ = precision_recall_fscore_support(y_test_cat, y_pred_test, labels=[0, 1], zero_division=0)
+    
+    print(f"   Low  - F1: {f_test_def[0]:.4f} → {f_test_cal[0]:.4f} (Δ={f_test_cal[0]-f_test_def[0]:+.4f})")
+    print(f"   Low  - Precision: {p_test_def[0]:.4f} → {p_test_cal[0]:.4f} (Δ={p_test_cal[0]-p_test_def[0]:+.4f})")
+    print(f"   Low  - Recall: {r_test_def[0]:.4f} → {r_test_cal[0]:.4f} (Δ={r_test_cal[0]-r_test_def[0]:+.4f})")
+    print(f"   High - F1: {f_test_def[1]:.4f} → {f_test_cal[1]:.4f} (Δ={f_test_cal[1]-f_test_def[1]:+.4f})")
+    
+    # Usar predicciones calibradas para el resto del análisis
+    y_pred_test = y_pred_test_calibrated
+    
+    # ========================================================================
+    
+    # Calcular métricas en test (con threshold calibrado)
     accuracy_test = accuracy_score(y_test_cat, y_pred_test)
     precision_test = precision_score(y_test_cat, y_pred_test, average='weighted', zero_division=0)
     recall_test = recall_score(y_test_cat, y_pred_test, average='weighted', zero_division=0)
@@ -270,12 +298,6 @@ if __name__ == "__main__":
     print(f"   Recall:          {recall_test:.4f}")
     print(f"   F1-score (weighted): {f1_test:.4f}")
     print(f"   F1-score (macro):    {f1_macro_test:.4f}")
-
-    if calibrated_metrics is not None:
-        print("\n🎯 Umbral calibrado (validación, F1_macro):")
-        print(f"   Threshold óptimo: {calibrated_metrics['threshold']:.3f}")
-        print(f"   Val F1_macro (calibrado): {calibrated_metrics['val']['F1_macro']:.4f}")
-        print(f"   Test F1_macro (calibrado): {calibrated_metrics['test']['F1_macro']:.4f}")
     
     # Comparar val vs test
     print(f"\n📈 Comparación Val vs Test:")
@@ -289,13 +311,31 @@ if __name__ == "__main__":
     print(" GENERANDO VISUALIZACIONES ".center(80))
     print("=" * 80)
     
-    # Matriz de confusión
+    # Matriz de confusión (usando predicciones calibradas)
     print("\nGenerando matriz de confusión...")
-    classification_pipeline.plot_confusion_matrix(X_test, y_test_cat, family='best', normalize=True)
+    cm = confusion_matrix(y_test_cat, y_pred_test)
+    cm_normalized = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+    
+    # Visualizar
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    
+    plt.figure(figsize=(10, 8))
+    sns.heatmap(cm_normalized, annot=True, fmt='.2f',
+               cmap='Blues', 
+               xticklabels=classification_pipeline.target_transformer.labels,
+               yticklabels=classification_pipeline.target_transformer.labels)
+    plt.ylabel('Clase Real')
+    plt.xlabel('Clase Predicha')
+    plt.title(f'Matriz de Confusión (Test) - {best_info["Modelo"]} (Threshold={best_threshold:.3f})')
+    plt.tight_layout()
+    plt.show()
     
     # Classification report
     print("\nReporte de clasificación completo:")
-    print(classification_pipeline.get_classification_report(X_test, y_test_cat, family='best'))
+    print(classification_report(y_test_cat, y_pred_test,
+                              target_names=classification_pipeline.target_transformer.labels,
+                              zero_division=0))
     
     # ========================================================================
     # PASO 6: GUARDAR RESULTADOS
@@ -325,28 +365,12 @@ if __name__ == "__main__":
     test_predictions_fp = outputs_dir / 'test_predictions.csv'
     test_results.to_csv(test_predictions_fp, index=False)
     print(f"   ✓ {test_predictions_fp}")
-
-    # Guardar predicciones calibradas (si aplica)
-    if y_pred_test_calibrated is not None:
-        test_results_cal = pd.DataFrame({
-            'y_true': y_test_cat,
-            'y_pred': y_pred_test_calibrated,
-            'correct': (y_test_cat == y_pred_test_calibrated).astype(int)
-        })
-        for i, label in enumerate(classification_pipeline.target_transformer.labels):
-            test_results_cal[f'proba_{label}'] = y_proba_test[:, i]
-        test_predictions_cal_fp = outputs_dir / 'test_predictions_calibrated.csv'
-        test_results_cal.to_csv(test_predictions_cal_fp, index=False)
-        print(f"   ✓ {test_predictions_cal_fp}")
     
     # Guardar métricas finales
     rows = [
         {'Dataset': 'Val', 'Accuracy': best_info['Accuracy_val'], 'Precision': best_info['Precision_val'], 'Recall': best_info['Recall_val'], 'F1_weighted': best_info['F1_weighted_val'], 'F1_macro': best_info['F1_macro_val']},
         {'Dataset': 'Test', 'Accuracy': accuracy_test, 'Precision': precision_test, 'Recall': recall_test, 'F1_weighted': f1_test, 'F1_macro': f1_macro_test}
     ]
-    if calibrated_metrics is not None:
-        rows.append({'Dataset': 'Val_calibrated', **calibrated_metrics['val']})
-        rows.append({'Dataset': 'Test_calibrated', **calibrated_metrics['test']})
     final_metrics = pd.DataFrame(rows)
     final_metrics_fp = outputs_dir / 'final_metrics.csv'
     final_metrics.to_csv(final_metrics_fp, index=False)
@@ -362,17 +386,6 @@ if __name__ == "__main__":
     cm_fp = outputs_dir / 'confusion_matrix.csv'
     cm_df.to_csv(cm_fp)
     print(f"   ✓ {cm_fp}")
-
-    # Guardar umbral calibrado
-    if calibrated_metrics is not None:
-        with open(outputs_dir / 'threshold_calibration.txt', 'w', encoding='utf-8') as f:
-            f.write(f"Threshold óptimo (Val, F1_macro): {calibrated_metrics['threshold']:.4f}\n")
-            f.write("Métricas calibradas (Val):\n")
-            for k, v in calibrated_metrics['val'].items():
-                f.write(f"  {k}: {v:.4f}\n")
-            f.write("Métricas calibradas (Test):\n")
-            for k, v in calibrated_metrics['test'].items():
-                f.write(f"  {k}: {v:.4f}\n")
     
     # Feature importance (si está disponible)
     if best_info['Familia'] == 'Árboles':
