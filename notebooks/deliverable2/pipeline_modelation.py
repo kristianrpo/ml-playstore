@@ -7,13 +7,13 @@ categorías de rating de aplicaciones en Google Play Store.
 Familias de modelos incluidas:
 - Árboles: RandomForest, ExtraTrees, GradientBoosting
 - Lineales: LogisticRegression, SGDClassifier
-- Boosting: XGBoost, LightGBM, CatBoost (SqrtBalanced para mejor precision)
+- Boosting: XGBoost, CatBoost
 
 NOTA: KNN ha sido removido del pipeline debido a overfitting severo (~27%)
 causado por lazy learning y curse of dimensionality.
 
-OPTIMIZACIÓN: CatBoost usa auto_class_weights='SqrtBalanced' para mejorar
-precision de clase minoritaria (Low) de 0.47 a 0.52 (+5.2%) manteniendo F1-macro.
+OPTIMIZACIÓN: CatBoost usa auto_class_weights='Balanced' para mejorar
+recall de clase minoritaria (Low) maximizando F1-score balanceado.
 
 Autor: Sistema de ML
 Fecha: 2025
@@ -39,7 +39,7 @@ from pathlib import Path
 
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
-from sklearn.model_selection import GridSearchCV, StratifiedKFold
+from sklearn.model_selection import GridSearchCV, StratifiedKFold, PredefinedSplit
 from sklearn.metrics import (
     accuracy_score, precision_score, recall_score, f1_score,
     confusion_matrix, classification_report
@@ -61,6 +61,7 @@ from catboost import CatBoostClassifier
 # Visualización
 import matplotlib.pyplot as plt
 import seaborn as sns
+from sklearn.metrics import precision_recall_fscore_support
 
 warnings.filterwarnings('ignore')
 
@@ -317,6 +318,20 @@ class TreeClassifierFamily(BaseEstimator):
             print("FAMILIA ÁRBOLES: RANDOM FOREST, EXTRA TREES, GRADIENT BOOSTING".center(80))
             print("=" * 80)
         
+        # Combinar train + val para GridSearchCV con validación predefinida
+        if X_val is not None and y_val is not None:
+            X_combined = pd.concat([X_train, X_val], axis=0).reset_index(drop=True)
+            y_combined = pd.concat([pd.Series(y_train), pd.Series(y_val)], axis=0).reset_index(drop=True)
+            # Crear split predefinido: -1 para train, 0 para val
+            test_fold = [-1] * len(X_train) + [0] * len(X_val)
+            ps = PredefinedSplit(test_fold)
+            cv_strategy = ps
+        else:
+            # Si no hay val, usar StratifiedKFold tradicional
+            X_combined = X_train
+            y_combined = y_train
+            cv_strategy = StratifiedKFold(n_splits=self.cv_folds, shuffle=True, random_state=self.random_state)
+        
         # ====================================================================
         # RANDOM FOREST
         # ====================================================================
@@ -325,11 +340,12 @@ class TreeClassifierFamily(BaseEstimator):
             print("-" * 80)
         
         param_grid_rf = {
-            'n_estimators': [100, 150, 200, 250],  # Añadido 250 para explorar más árboles
-            'max_depth': [10, 15, 20, 25, None],  # Añadido 25 para explorar profundidad intermedia
-            'min_samples_split': [5, 10],  # Añadido 5 para permitir splits más finos
-            'min_samples_leaf': [2, 3, 5],  # Añadido 2 para hojas más pequeñas
-            'max_features': ['sqrt']  # Mantener fijo para reducir combinaciones
+            'n_estimators': [80, 100],  # Reducido más para evitar overfitting
+            'max_depth': [6, 8, 10],  # Profundidades más conservadoras (era 8,10,12,15)
+            'min_samples_split': [15, 20, 25],  # Más conservador (era 10,15,20)
+            'min_samples_leaf': [6, 8, 10],  # Hojas más grandes (era 4,5,8)
+            'max_features': ['sqrt'],  # Mantener sqrt
+            'max_samples': [0.6, 0.7]  # Más agresivo con bagging (era 0.7,0.8)
         }
         
         if self.verbose:
@@ -337,25 +353,29 @@ class TreeClassifierFamily(BaseEstimator):
                        len(param_grid_rf['max_depth']) * 
                        len(param_grid_rf['min_samples_split']) *
                        len(param_grid_rf['min_samples_leaf']) *
-                       len(param_grid_rf['max_features']))
+                       len(param_grid_rf['max_features']) *
+                       len(param_grid_rf['max_samples']))
             print(f"  Combinaciones: {total_rf}")
         
         start_time = time.time()
         
+        # Usar class_weight más agresivo: duplicar peso de clase minoritaria
+        aggressive_class_weight = {0: 2.5, 1: 1.0}  # Low=2.5x, High=1.0x
+        
         rf_grid = GridSearchCV(
             RandomForestClassifier(
                 random_state=self.random_state,
-                class_weight='balanced',
+                class_weight=aggressive_class_weight,
                 n_jobs=self.n_jobs
             ),
             param_grid_rf,
-            cv=StratifiedKFold(n_splits=self.cv_folds, shuffle=True, random_state=self.random_state),
-            scoring='f1_weighted',
+            cv=cv_strategy,
+            scoring='f1_macro',
             n_jobs=self.n_jobs,
             verbose=1 if self.verbose else 0
         )
         
-        rf_grid.fit(X_train, y_train)
+        rf_grid.fit(X_combined, y_combined)
         rf_time = time.time() - start_time
         
         self.models['Random Forest'] = rf_grid.best_estimator_
@@ -363,9 +383,9 @@ class TreeClassifierFamily(BaseEstimator):
         if self.verbose:
             print(f"  ✓ Completado en {rf_time:.2f}s")
             print(f"  Mejores parámetros: {rf_grid.best_params_}")
-            print(f"  Mejor CV F1-score: {rf_grid.best_score_:.4f}")
+            print(f"  Mejor score en val: {rf_grid.best_score_:.4f}")
         
-        # Evaluar en validación
+        # Evaluar en validación (ahora son métricas finales del mejor modelo)
         if X_val is not None and y_val is not None:
             y_pred_val = rf_grid.predict(X_val)
             y_pred_train = rf_grid.predict(X_train)
@@ -403,6 +423,9 @@ class TreeClassifierFamily(BaseEstimator):
         
         start_time = time.time()
         
+        # Usar class_weight más agresivo
+        aggressive_class_weight = {0: 2.5, 1: 1.0}
+        
         et_model = ExtraTreesClassifier(
             n_estimators=best_rf_params['n_estimators'],
             max_depth=best_rf_params['max_depth'],
@@ -410,11 +433,11 @@ class TreeClassifierFamily(BaseEstimator):
             min_samples_leaf=best_rf_params['min_samples_leaf'],
             max_features=best_rf_params['max_features'],
             random_state=self.random_state,
-            class_weight='balanced',
+            class_weight=aggressive_class_weight,
             n_jobs=self.n_jobs
         )
         
-        et_model.fit(X_train, y_train)
+        et_model.fit(X_combined, y_combined)
         et_time = time.time() - start_time
         
         self.models['Extra Trees'] = et_model
@@ -451,12 +474,13 @@ class TreeClassifierFamily(BaseEstimator):
             print("-" * 80)
         
         param_grid_gb = {
-            'learning_rate': [0.05, 0.1, 0.15],  # Añadido 0.15 para convergencia más rápida
-            'n_estimators': [100, 150, 200],  # Añadido 150 y 200 para más iteraciones
-            'max_depth': [3, 4, 5],  # Añadido 4 y 5 para árboles un poco más profundos
-            'subsample': [0.7, 0.8, 0.9],  # Añadido 0.7 y 0.9 para explorar submuestreo
-            'min_samples_split': [10],  # Mantener fijo
-            'min_samples_leaf': [5]  # Mantener fijo
+            'learning_rate': [0.03, 0.05, 0.08],  # Más conservador (era 0.05,0.08,0.1)
+            'n_estimators': [80, 100, 120],  # Menos árboles para evitar overfitting
+            'max_depth': [2, 3, 4],  # Árboles más shallow (era 3,4,5)
+            'subsample': [0.6, 0.7],  # Submuestreo más agresivo (era 0.7,0.8)
+            'min_samples_split': [20, 25],  # Más conservador (era 15,20)
+            'min_samples_leaf': [10, 12],  # Hojas más grandes (era 8,10)
+            'max_features': ['sqrt']  # Mantener sqrt
         }
         
         if self.verbose:
@@ -465,7 +489,8 @@ class TreeClassifierFamily(BaseEstimator):
                        len(param_grid_gb['max_depth']) *
                        len(param_grid_gb['subsample']) *
                        len(param_grid_gb['min_samples_split']) *
-                       len(param_grid_gb['min_samples_leaf']))
+                       len(param_grid_gb['min_samples_leaf']) *
+                       len(param_grid_gb['max_features']))
             print(f"  Combinaciones: {total_gb}")
         
         start_time = time.time()
@@ -473,13 +498,13 @@ class TreeClassifierFamily(BaseEstimator):
         gb_grid = GridSearchCV(
             GradientBoostingClassifier(random_state=self.random_state),
             param_grid_gb,
-            cv=StratifiedKFold(n_splits=self.cv_folds, shuffle=True, random_state=self.random_state),
-            scoring='f1_weighted',
+            cv=cv_strategy,
+            scoring='f1_macro',
             n_jobs=self.n_jobs,
             verbose=1 if self.verbose else 0
         )
         
-        gb_grid.fit(X_train, y_train)
+        gb_grid.fit(X_combined, y_combined)
         gb_time = time.time() - start_time
         
         self.models['Gradient Boosting'] = gb_grid.best_estimator_
@@ -487,7 +512,7 @@ class TreeClassifierFamily(BaseEstimator):
         if self.verbose:
             print(f"  ✓ Completado en {gb_time:.2f}s")
             print(f"  Mejores parámetros: {gb_grid.best_params_}")
-            print(f"  Mejor CV F1-score: {gb_grid.best_score_:.4f}")
+            print(f"  Mejor score en val: {gb_grid.best_score_:.4f}")
         
         # Evaluar
         if X_val is not None and y_val is not None:
@@ -741,13 +766,18 @@ class LinearClassifierFamily(BaseEstimator):
             print("FAMILIA LINEALES: LOGISTIC REGRESSION, SGD CLASSIFIER".center(80))
             print("=" * 80)
         
+        # Combinar train y val para GridSearchCV con PredefinedSplit
+        X_combined = pd.concat([X_train, X_val], ignore_index=True)
+        y_combined = pd.concat([y_train, y_val], ignore_index=True)
+        test_fold = [-1] * len(X_train) + [0] * len(X_val)
+        cv_strategy = PredefinedSplit(test_fold)
+        
         # Escalado
         if self.verbose:
             print("\n[0/2] Aplicando StandardScaler...")
         
         self.scaler = StandardScaler()
-        X_train_scaled = self.scaler.fit_transform(X_train)
-        X_val_scaled = self.scaler.transform(X_val) if X_val is not None else None
+        X_combined_scaled = self.scaler.fit_transform(X_combined)
         
         if self.verbose:
             print(f"  ✓ Datos escalados")
@@ -782,13 +812,13 @@ class LinearClassifierFamily(BaseEstimator):
                 n_jobs=self.n_jobs
             ),
             param_grid_lr,
-            cv=StratifiedKFold(n_splits=self.cv_folds, shuffle=True, random_state=self.random_state),
-            scoring='f1_weighted',
+            cv=cv_strategy,
+            scoring='f1_macro',
             n_jobs=self.n_jobs,
             verbose=1 if self.verbose else 0
         )
         
-        lr_grid.fit(X_train_scaled, y_train)
+        lr_grid.fit(X_combined_scaled, y_combined)
         lr_time = time.time() - start_time
         
         self.models['Logistic Regression'] = lr_grid.best_estimator_
@@ -796,10 +826,13 @@ class LinearClassifierFamily(BaseEstimator):
         if self.verbose:
             print(f"  ✓ Completado en {lr_time:.2f}s")
             print(f"  Mejores parámetros: {lr_grid.best_params_}")
-            print(f"  Mejor CV F1-score: {lr_grid.best_score_:.4f}")
+            print(f"  Mejor score en val: {lr_grid.best_score_:.4f}")
         
         # Evaluar
-        if X_val_scaled is not None and y_val is not None:
+        if X_val is not None and y_val is not None:
+            X_val_scaled = self.scaler.transform(X_val)
+            X_train_scaled = self.scaler.transform(X_train)
+            
             y_pred_val = lr_grid.predict(X_val_scaled)
             y_pred_train = lr_grid.predict(X_train_scaled)
             y_proba_val = lr_grid.predict_proba(X_val_scaled)
@@ -849,13 +882,13 @@ class LinearClassifierFamily(BaseEstimator):
                 n_jobs=self.n_jobs
             ),
             param_grid_sgd,
-            cv=StratifiedKFold(n_splits=self.cv_folds, shuffle=True, random_state=self.random_state),
-            scoring='f1_weighted',
+            cv=cv_strategy,
+            scoring='f1_macro',
             n_jobs=self.n_jobs,
             verbose=1 if self.verbose else 0
         )
         
-        sgd_grid.fit(X_train_scaled, y_train)
+        sgd_grid.fit(X_combined_scaled, y_combined)
         sgd_time = time.time() - start_time
         
         self.models['SGD Classifier'] = sgd_grid.best_estimator_
@@ -863,10 +896,13 @@ class LinearClassifierFamily(BaseEstimator):
         if self.verbose:
             print(f"  ✓ Completado en {sgd_time:.2f}s")
             print(f"  Mejores parámetros: {sgd_grid.best_params_}")
-            print(f"  Mejor CV F1-score: {sgd_grid.best_score_:.4f}")
+            print(f"  Mejor score en val: {sgd_grid.best_score_:.4f}")
         
         # Evaluar
-        if X_val_scaled is not None and y_val is not None:
+        if X_val is not None and y_val is not None:
+            X_val_scaled = self.scaler.transform(X_val)
+            X_train_scaled = self.scaler.transform(X_train)
+            
             y_pred_val = sgd_grid.predict(X_val_scaled)
             y_pred_train = sgd_grid.predict(X_train_scaled)
             
@@ -975,16 +1011,21 @@ class BoostingClassifierFamily(BaseEstimator):
             print("FAMILIA BOOSTING: XGBOOST, CATBOOST, LIGHTGBM".center(80))
             print("=" * 80)
         
+        # Combinar train y val para GridSearchCV con PredefinedSplit
+        X_combined = pd.concat([X_train, X_val], ignore_index=True)
+        y_combined = pd.concat([y_train, y_val], ignore_index=True)
+        test_fold = [-1] * len(X_train) + [0] * len(X_val)
+        cv_strategy = PredefinedSplit(test_fold)
+        
         # Escalado
         if self.verbose:
             print("\n[0/3] Aplicando MinMaxScaler...")
         
         self.scaler = MinMaxScaler()
-        X_train_scaled = self.scaler.fit_transform(X_train)
-        X_val_scaled = self.scaler.transform(X_val) if X_val is not None else None
+        X_combined_scaled = self.scaler.fit_transform(X_combined)
         
         if self.verbose:
-            print(f"  ✓ Datos escalados: rango=[{X_train_scaled.min():.4f}, {X_train_scaled.max():.4f}]")
+            print(f"  ✓ Datos escalados: rango=[{X_combined_scaled.min():.4f}, {X_combined_scaled.max():.4f}]")
         
         # ====================================================================
         # XGBOOST
@@ -994,13 +1035,14 @@ class BoostingClassifierFamily(BaseEstimator):
             print("-" * 80)
         
         param_grid_xgb = {
-            'n_estimators': [100, 150, 200],  # Más estimadores para mejor ensamble
-            'learning_rate': [0.03, 0.05, 0.1],  # Añadido 0.03 para aprendizaje más fino
-            'max_depth': [4, 5, 6],  # Más opciones de profundidad
-            'subsample': [0.7, 0.8, 0.9],  # Explorar más submuestreo
-            'colsample_bytree': [0.8],  # Mantener fijo para reducir combinaciones
-            'reg_alpha': [0.5],  # Mantener fijo
-            'reg_lambda': [1.0]  # Mantener fijo
+            'n_estimators': [100, 150],  # Reducido para evitar overfitting
+            'learning_rate': [0.05, 0.08],  # Learning rates más conservadores
+            'max_depth': [4, 5],  # Árboles menos profundos
+            'subsample': [0.7, 0.8],  # Submuestreo más agresivo
+            'colsample_bytree': [0.7, 0.8],  # Feature sampling
+            'reg_alpha': [1.0, 2.0],  # Regularización L1
+            'reg_lambda': [2.0, 3.0],  # Regularización L2 aumentada
+            'min_child_weight': [5, 8]  # Mínimo peso en nodos hoja aumentado
         }
         
         if self.verbose:
@@ -1010,25 +1052,33 @@ class BoostingClassifierFamily(BaseEstimator):
                         len(param_grid_xgb['subsample']) *
                         len(param_grid_xgb['colsample_bytree']) *
                         len(param_grid_xgb['reg_alpha']) *
-                        len(param_grid_xgb['reg_lambda']))
-            print(f"  Combinaciones: {total_xgb}")  # Ahora será 81 combinaciones
+                        len(param_grid_xgb['reg_lambda']) *
+                        len(param_grid_xgb['min_child_weight']))
+            print(f"  Combinaciones: {total_xgb}")
         
         start_time = time.time()
+        
+        # Calcular scale_pos_weight para XGBoost: ratio High/Low
+        # Low=0 (minoritaria), High=1 (mayoritaria)
+        n_low = (y_combined == 0).sum()
+        n_high = (y_combined == 1).sum()
+        scale_pos_weight = n_high / n_low  # ~2.58 si Low=27.9%
         
         xgb_grid = GridSearchCV(
             XGBClassifier(
                 random_state=self.random_state,
                 n_jobs=self.n_jobs,
-                eval_metric='mlogloss'
+                eval_metric='mlogloss',
+                scale_pos_weight=scale_pos_weight  # Penaliza más errores en Low
             ),
             param_grid_xgb,
-            cv=StratifiedKFold(n_splits=self.cv_folds, shuffle=True, random_state=self.random_state),
-            scoring='f1_weighted',
+            cv=cv_strategy,
+            scoring='f1_macro',
             n_jobs=self.n_jobs,
             verbose=1 if self.verbose else 0
         )
         
-        xgb_grid.fit(X_train_scaled, y_train)
+        xgb_grid.fit(X_combined_scaled, y_combined)
         xgb_time = time.time() - start_time
         
         self.models['XGBoost'] = xgb_grid.best_estimator_
@@ -1036,10 +1086,13 @@ class BoostingClassifierFamily(BaseEstimator):
         if self.verbose:
             print(f"  ✓ Completado en {xgb_time:.2f}s")
             print(f"  Mejores parámetros: {xgb_grid.best_params_}")
-            print(f"  Mejor CV F1-score: {xgb_grid.best_score_:.4f}")
+            print(f"  Mejor score en val: {xgb_grid.best_score_:.4f}")
         
         # Evaluar
-        if X_val_scaled is not None and y_val is not None:
+        if X_val is not None and y_val is not None:
+            X_val_scaled = self.scaler.transform(X_val)
+            X_train_scaled = self.scaler.transform(X_train)
+            
             y_pred_val = xgb_grid.predict(X_val_scaled)
             y_pred_train = xgb_grid.predict(X_train_scaled)
             y_proba_val = xgb_grid.predict_proba(X_val_scaled)
@@ -1069,36 +1122,43 @@ class BoostingClassifierFamily(BaseEstimator):
             print("-" * 80)
         
         param_grid_catboost = {
-            'iterations': [100, 150, 200],  # Más iteraciones para mejor convergencia
-            'learning_rate': [0.03, 0.05, 0.1],  # Añadido 0.03 para explorar aprendizaje más lento
-            'depth': [4, 5, 6],  # Añadido 5 como valor intermedio
-            'l2_leaf_reg': [1, 3, 5]  # Añadido 5 para más regularización
+            'iterations': [100, 150],  # Reducido para evitar overfitting
+            'learning_rate': [0.05, 0.08],  # Learning rates conservadores
+            'depth': [4, 5],  # Árboles más simples
+            'l2_leaf_reg': [3, 5, 8],  # Regularización fuerte
+            'subsample': [0.7, 0.8],  # Nuevo: bagging más agresivo
+            'colsample_bylevel': [0.7, 0.8]  # Nuevo: feature sampling
         }
         
         if self.verbose:
             total_catboost = (len(param_grid_catboost['iterations']) * 
                              len(param_grid_catboost['learning_rate']) * 
                              len(param_grid_catboost['depth']) *
-                             len(param_grid_catboost['l2_leaf_reg']))
-            print(f"  Combinaciones: {total_catboost}")  # Ahora será 81 combinaciones
+                             len(param_grid_catboost['l2_leaf_reg']) *
+                             len(param_grid_catboost['subsample']) *
+                             len(param_grid_catboost['colsample_bylevel']))
+            print(f"  Combinaciones: {total_catboost}")
         
         start_time = time.time()
+        
+        # Calcular class_weights para CatBoost: Low=2.5x, High=1.0x
+        catboost_class_weights = [2.5, 1.0]  # [Low, High]
         
         catboost_grid = GridSearchCV(
             CatBoostClassifier(
                 random_state=self.random_state,
                 verbose=0,  # Silenciar logs de CatBoost
                 thread_count=self.n_jobs if self.n_jobs > 0 else -1,
-                auto_class_weights='SqrtBalanced'  # Peso moderado para mejor precision
+                class_weights=catboost_class_weights  # Penaliza más errores en Low
             ),
             param_grid_catboost,
-            cv=StratifiedKFold(n_splits=self.cv_folds, shuffle=True, random_state=self.random_state),
-            scoring='f1_weighted',
+            cv=cv_strategy,
+            scoring='f1_macro',
             n_jobs=1,  # CatBoost ya usa múltiples threads internamente
             verbose=1 if self.verbose else 0
         )
         
-        catboost_grid.fit(X_train_scaled, y_train)
+        catboost_grid.fit(X_combined_scaled, y_combined)
         catboost_time = time.time() - start_time
         
         self.models['CatBoost'] = catboost_grid.best_estimator_
@@ -1106,10 +1166,13 @@ class BoostingClassifierFamily(BaseEstimator):
         if self.verbose:
             print(f"  ✓ Completado en {catboost_time:.2f}s")
             print(f"  Mejores parámetros: {catboost_grid.best_params_}")
-            print(f"  Mejor CV F1-score: {catboost_grid.best_score_:.4f}")
+            print(f"  Mejor score en val: {catboost_grid.best_score_:.4f}")
         
         # Evaluar
-        if X_val_scaled is not None and y_val is not None:
+        if X_val is not None and y_val is not None:
+            X_val_scaled = self.scaler.transform(X_val)
+            X_train_scaled = self.scaler.transform(X_train)
+            
             y_pred_val = catboost_grid.predict(X_val_scaled)
             y_pred_train = catboost_grid.predict(X_train_scaled)
             y_proba_val = catboost_grid.predict_proba(X_val_scaled)
@@ -1240,6 +1303,7 @@ class BoostingClassifierFamily(BaseEstimator):
 
 
 
+
 # ============================================================================
 # ORQUESTADOR PRINCIPAL - CLASSIFICATION TRAINING PIPELINE
 # ============================================================================
@@ -1310,13 +1374,20 @@ class ClassificationTrainingPipeline(BaseEstimator):
         self.linear_family = None
         self.boosting_family = None
         
+        # Datos de test (para evaluación final)
+        self.X_test = None
+        self.y_test = None
+        self.y_test_cat = None
+        
         # Resultados
         self.all_results = {}
         self.comparison_df = None
+        self.test_comparison_df = None
         self.best_model_info = None
+        self.best_test_model_info = None
         self.total_time = 0
     
-    def fit(self, X_train, y_train, X_val=None, y_val=None) -> 'ClassificationTrainingPipeline':
+    def fit(self, X_train, y_train, X_val=None, y_val=None, X_test=None, y_test=None) -> 'ClassificationTrainingPipeline':
         """
         Entrena todas las familias de modelos de clasificación.
         
@@ -1325,6 +1396,8 @@ class ClassificationTrainingPipeline(BaseEstimator):
             y_train: Target de entrenamiento (Rating continuo)
             X_val: Features de validación (opcional)
             y_val: Target de validación (opcional)
+            X_test: Features de test (opcional)
+            y_test: Target de test (opcional)
             
         Returns:
             self: Instancia entrenada
@@ -1337,6 +1410,8 @@ class ClassificationTrainingPipeline(BaseEstimator):
             print(f"  Train: {X_train.shape}")
             if X_val is not None:
                 print(f"  Val:   {X_val.shape}")
+            if X_test is not None:
+                print(f"  Test:  {X_test.shape}")
             print(f"  CV Folds: {self.cv_folds}")
             print(f"  Random State: {self.random_state}")
             print(f"  Familias a entrenar: {[f.upper() for f in self.families_to_train]}")
@@ -1362,6 +1437,18 @@ class ClassificationTrainingPipeline(BaseEstimator):
         y_train_cat = self.target_transformer.fit_transform(y_train)
         y_val_cat = self.target_transformer.transform(y_val) if y_val is not None else None
         
+        # Guardar datos de validación para threshold optimization
+        if X_val is not None and y_val is not None:
+            self.X_val = X_val
+            self.y_val = y_val
+            self.y_val_cat = y_val_cat
+        
+        # Guardar datos de test para evaluación final
+        if X_test is not None and y_test is not None:
+            self.X_test = X_test
+            self.y_test = y_test
+            self.y_test_cat = self.target_transformer.transform(y_test)
+        
         # Validar distribución de clases
         class_dist = self.target_transformer.get_class_distribution(y_train_cat)
         min_samples = class_dist['Count'].min()
@@ -1374,6 +1461,40 @@ class ClassificationTrainingPipeline(BaseEstimator):
         
         if self.verbose:
             print(f"\n✓ Distribución de clases validada (mínimo {min_samples} muestras por clase)")
+        
+        # ====================================================================
+        # CALCULAR CLASS WEIGHTS PARA BALANCEO
+        # ====================================================================
+        if self.verbose:
+            print("\n" + "=" * 80)
+            print(" CALCULANDO CLASS WEIGHTS PARA BALANCEO ".center(80, "="))
+            print("=" * 80)
+        
+        # Calcular class_weight: penalizar más errores en clase minoritaria
+        from sklearn.utils.class_weight import compute_class_weight
+        
+        class_weights = compute_class_weight(
+            class_weight='balanced',
+            classes=np.unique(y_train_cat),
+            y=y_train_cat
+        )
+        
+        # Crear diccionario {clase: peso}
+        self.class_weight_dict = {i: weight for i, weight in enumerate(class_weights)}
+        
+        if self.verbose:
+            print(f"\nClass weights calculados (balanced):")
+            for class_idx, weight in self.class_weight_dict.items():
+                label = self.target_transformer.label_mapping_[class_idx]
+                count = (y_train_cat == class_idx).sum()
+                pct = count / len(y_train_cat) * 100
+                print(f"  {label} (clase {class_idx}): weight={weight:.2f} | {count} muestras ({pct:.1f}%)")
+            
+            # Mostrar pesos más agresivos que usaremos
+            print(f"\n✓ Usaremos class_weight MÁS AGRESIVO:")
+            print(f"  Low (clase 0): weight=2.5x (vs {self.class_weight_dict[0]:.2f}x balanced)")
+            print(f"  High (clase 1): weight=1.0x")
+            print(f"  → Los modelos penalizarán 2.5x más los errores en Low")
         
         # ====================================================================
         # ENTRENAR FAMILIAS
@@ -1472,14 +1593,135 @@ class ClassificationTrainingPipeline(BaseEstimator):
         self.total_time = time.time() - start_total
         
         # ====================================================================
-        # GENERAR COMPARACIÓN
+        # GENERAR COMPARACIÓN EN VALIDACIÓN
         # ====================================================================
         self._generate_comparison()
+        
+        # ====================================================================
+        # EVALUAR EN TEST (si está disponible)
+        # ====================================================================
+        if self.X_test is not None and self.y_test_cat is not None:
+            self._evaluate_on_test(X_train, y_train_cat)
         
         if self.verbose:
             self._print_summary()
         
         return self
+    
+    def _optimize_threshold(self, y_true, y_proba, metric='f1_macro'):
+        """
+        Encuentra el threshold óptimo para clasificación binaria.
+        
+        Args:
+            y_true: Etiquetas reales
+            y_proba: Probabilidades predichas (columna 1 = clase positiva)
+            metric: Métrica a optimizar ('f1_macro', 'recall_low', 'f1_weighted')
+            
+        Returns:
+            float: Threshold óptimo
+        """
+        thresholds = np.arange(0.05, 0.85, 0.025)  # Rango más amplio y fino (era 0.1-0.9 con 0.05)
+        best_score = -1
+        best_threshold = 0.5
+        
+        for threshold in thresholds:
+            y_pred = (y_proba[:, 1] >= threshold).astype(int)
+            
+            if metric == 'f1_macro':
+                score = f1_score(y_true, y_pred, average='macro', zero_division=0)
+            elif metric == 'recall_low':
+                # Recall de la clase Low (índice 0)
+                recall_per_class = recall_score(y_true, y_pred, average=None, zero_division=0)
+                score = recall_per_class[0] if len(recall_per_class) > 0 else 0
+            elif metric == 'f1_weighted':
+                score = f1_score(y_true, y_pred, average='weighted', zero_division=0)
+            else:
+                score = f1_score(y_true, y_pred, average='macro', zero_division=0)
+            
+            if score > best_score:
+                best_score = score
+                best_threshold = threshold
+        
+        return best_threshold
+    
+    def _evaluate_on_test(self, X_train, y_train_cat):
+        """Evalúa todos los modelos en el conjunto de test con threshold optimization"""
+        if self.verbose:
+            print("\n" + "=" * 80)
+            print(" EVALUACIÓN EN TEST CON THRESHOLD OPTIMIZATION ".center(80, "="))
+            print("=" * 80)
+        
+        test_results = []
+        
+        # Evaluar cada modelo en test
+        for _, row in self.comparison_df.iterrows():
+            familia = row['Familia']
+            modelo = row['Modelo']
+            
+            # Obtener probabilidades en validación para encontrar threshold óptimo
+            if familia == 'Árboles':
+                y_proba_val = self.tree_family.predict_proba(self.X_val, model_name=modelo)
+                y_proba_test = self.tree_family.predict_proba(self.X_test, model_name=modelo)
+                y_proba_train = self.tree_family.predict_proba(X_train, model_name=modelo)
+            elif familia == 'Lineales':
+                y_proba_val = self.linear_family.predict_proba(self.X_val, model_name=modelo)
+                y_proba_test = self.linear_family.predict_proba(self.X_test, model_name=modelo)
+                y_proba_train = self.linear_family.predict_proba(X_train, model_name=modelo)
+            elif familia == 'Boosting':
+                y_proba_val = self.boosting_family.predict_proba(self.X_val, model_name=modelo)
+                y_proba_test = self.boosting_family.predict_proba(self.X_test, model_name=modelo)
+                y_proba_train = self.boosting_family.predict_proba(X_train, model_name=modelo)
+            
+            # Optimizar threshold en validación
+            optimal_threshold = self._optimize_threshold(self.y_val_cat, y_proba_val, metric='f1_macro')
+            
+            if self.verbose:
+                print(f"\n{modelo} ({familia}): threshold óptimo = {optimal_threshold:.3f}")
+            
+            # Aplicar threshold óptimo para hacer predicciones
+            y_pred_test = (y_proba_test[:, 1] >= optimal_threshold).astype(int)
+            y_pred_train = (y_proba_train[:, 1] >= optimal_threshold).astype(int)
+            
+            # Calcular métricas
+            acc_train = accuracy_score(y_train_cat, y_pred_train)
+            acc_test = accuracy_score(self.y_test_cat, y_pred_test)
+            
+            precision_test = precision_score(self.y_test_cat, y_pred_test, average='weighted', zero_division=0)
+            recall_test = recall_score(self.y_test_cat, y_pred_test, average='weighted', zero_division=0)
+            f1_weighted_test = f1_score(self.y_test_cat, y_pred_test, average='weighted', zero_division=0)
+            f1_macro_test = f1_score(self.y_test_cat, y_pred_test, average='macro', zero_division=0)
+            
+            # Métricas por clase
+            precision_per_class, recall_per_class, f1_per_class, _ = precision_recall_fscore_support(
+                self.y_test_cat, y_pred_test, zero_division=0
+            )
+            
+            test_results.append({
+                'Familia': familia,
+                'Modelo': modelo,
+                'Optimal_Threshold': optimal_threshold,
+                'Accuracy_train': acc_train,
+                'Accuracy_test': acc_test,
+                'Precision_test': precision_test,
+                'Recall_test': recall_test,
+                'F1_weighted_test': f1_weighted_test,
+                'F1_macro_test': f1_macro_test,
+                'Overfitting_train_test': abs(acc_train - acc_test),
+                'Tiempo_seg': row['Tiempo_seg'],
+                'predictions': y_pred_test,
+                'precision_per_class': precision_per_class,
+                'recall_per_class': recall_per_class,
+                'f1_per_class': f1_per_class
+            })
+        
+        # Crear DataFrame y ordenar por F1-macro en test
+        self.test_comparison_df = pd.DataFrame(test_results)
+        self.test_comparison_df = self.test_comparison_df.sort_values('F1_macro_test', ascending=False).reset_index(drop=True)
+        
+        # Identificar mejor modelo en test
+        if len(self.test_comparison_df) > 0:
+            best_idx = self.test_comparison_df['F1_macro_test'].idxmax()
+            self.best_test_model_info = self.test_comparison_df.loc[best_idx].to_dict()
     
     def _generate_comparison(self):
         """Genera tabla comparativa de todos los modelos"""
@@ -1555,7 +1797,7 @@ class ClassificationTrainingPipeline(BaseEstimator):
                         'Tiempo_seg': r['train_time']
                     })
         
-        # Crear DataFrame y ordenar por F1_weighted
+        # Crear DataFrame y ordenar por F1_weighted_val
         self.comparison_df = pd.DataFrame(comparison_data)
         self.comparison_df = self.comparison_df.sort_values('F1_weighted_val', ascending=False).reset_index(drop=True)
         
@@ -1565,28 +1807,92 @@ class ClassificationTrainingPipeline(BaseEstimator):
             self.best_model_info = self.comparison_df.loc[best_idx].to_dict()
     
     def _print_summary(self):
-        """Imprime resumen comparativo"""
+        """Imprime resumen comparativo con validación y test"""
         print("\n" + "=" * 80)
-        print(" RESUMEN COMPARATIVO - TODOS LOS MODELOS ".center(80, "="))
+        print(" RESUMEN - VALIDACIÓN ".center(80, "="))
         print("=" * 80)
         
-        print("\nRanking por F1-score weighted en validación:")
+        print("\n📊 Ranking por F1-weighted en validación:")
         print(self.comparison_df.to_string(index=False))
         
-        print(f"\n{'=' * 80}")
-        print(f"Tiempo total de entrenamiento: {self.total_time:.2f}s ({self.total_time/60:.2f} min)")
-        print(f"{'=' * 80}")
+        # Si hay resultados de test, mostrarlos
+        if self.test_comparison_df is not None and len(self.test_comparison_df) > 0:
+            print("\n" + "=" * 80)
+            print(" RESUMEN - TEST (con Threshold Optimization) ".center(80, "="))
+            print("=" * 80)
+            
+            # Mostrar solo columnas relevantes para test (incluyendo threshold)
+            test_display_df = self.test_comparison_df[[
+                'Familia', 'Modelo', 'Optimal_Threshold', 'Accuracy_train', 'Accuracy_test', 
+                'F1_weighted_test', 'F1_macro_test', 'Overfitting_train_test', 'Tiempo_seg'
+            ]].copy()
+            
+            print("\n📊 Ranking por F1-macro en test:")
+            print(test_display_df.to_string(index=False))
+            
+            # MEJOR MODELO EN TEST
+            if self.best_test_model_info:
+                print("\n" + "=" * 80)
+                print(" 🏆 MEJOR MODELO EN TEST ".center(80, "="))
+                print("=" * 80)
+                
+                print(f"\n🎯 {self.best_test_model_info['Modelo']} ({self.best_test_model_info['Familia']})")
+                print(f"   └─ Threshold óptimo:     {self.best_test_model_info['Optimal_Threshold']:.3f}")
+                
+                print(f"\n📊 Métricas Generales:")
+                print(f"   ├─ Accuracy (train):     {self.best_test_model_info['Accuracy_train']:.4f}")
+                print(f"   ├─ Accuracy (test):      {self.best_test_model_info['Accuracy_test']:.4f}")
+                print(f"   ├─ Precision (test):     {self.best_test_model_info['Precision_test']:.4f}")
+                print(f"   ├─ Recall (test):        {self.best_test_model_info['Recall_test']:.4f}")
+                print(f"   ├─ F1-weighted (test):   {self.best_test_model_info['F1_weighted_test']:.4f}")
+                print(f"   └─ F1-macro (test):      {self.best_test_model_info['F1_macro_test']:.4f}")
+                
+                print(f"\n📉 Overfitting:")
+                ovf_pct = self.best_test_model_info['Overfitting_train_test'] * 100
+                print(f"   └─ Train-Test Gap:       {self.best_test_model_info['Overfitting_train_test']:.4f} ({ovf_pct:.2f}%)")
+                
+                # Métricas por clase
+                print(f"\n📊 Métricas por Clase:")
+                for i, label in enumerate(self.target_transformer.labels):
+                    precision_class = self.best_test_model_info['precision_per_class'][i]
+                    recall_class = self.best_test_model_info['recall_per_class'][i]
+                    f1_class = self.best_test_model_info['f1_per_class'][i]
+                    
+                    print(f"\n   {label}:")
+                    print(f"      ├─ Precision:  {precision_class:.4f}")
+                    print(f"      ├─ Recall:     {recall_class:.4f}")
+                    print(f"      └─ F1-score:   {f1_class:.4f}")
+                
+                # Matriz de confusión
+                y_pred_best = self.best_test_model_info['predictions']
+                cm = confusion_matrix(self.y_test_cat, y_pred_best)
+                cm_normalized = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+                
+                print(f"\n📊 Matriz de Confusión (conteos):")
+                print(f"   {'':>10}", end='')
+                for label in self.target_transformer.labels:
+                    print(f"  Pred_{label:>6}", end='')
+                print()
+                for i, label in enumerate(self.target_transformer.labels):
+                    print(f"   Real_{label:>5}", end='')
+                    for j in range(len(self.target_transformer.labels)):
+                        print(f"  {cm[i, j]:>9}", end='')
+                    print()
+                
+                print(f"\n📊 Matriz de Confusión (normalizada):")
+                print(f"   {'':>10}", end='')
+                for label in self.target_transformer.labels:
+                    print(f"  Pred_{label:>6}", end='')
+                print()
+                for i, label in enumerate(self.target_transformer.labels):
+                    print(f"   Real_{label:>5}", end='')
+                    for j in range(len(self.target_transformer.labels)):
+                        print(f"  {cm_normalized[i, j]:>9.4f}", end='')
+                    print()
         
-        if self.best_model_info:
-            print(f"\n🏆 MEJOR MODELO:")
-            print(f"   Familia:          {self.best_model_info['Familia']}")
-            print(f"   Modelo:           {self.best_model_info['Modelo']}")
-            print(f"   Accuracy (val):   {self.best_model_info['Accuracy_val']:.4f}")
-            print(f"   F1-score (val):   {self.best_model_info['F1_weighted_val']:.4f}")
-            print(f"   Precision (val):  {self.best_model_info['Precision_val']:.4f}")
-            print(f"   Recall (val):     {self.best_model_info['Recall_val']:.4f}")
-            print(f"   Overfitting:      {self.best_model_info['Overfitting']:.4f}")
-            print(f"   Tiempo:           {self.best_model_info['Tiempo_seg']:.2f}s")
+        print(f"\n{'=' * 80}")
+        print(f"⏱️  Tiempo total: {self.total_time:.2f}s ({self.total_time/60:.2f} min)")
+        print(f"{'=' * 80}")
     
     def predict(self, X, family='best', model_name=None) -> np.ndarray:
         """
@@ -1594,7 +1900,7 @@ class ClassificationTrainingPipeline(BaseEstimator):
         
         Args:
             X: Features para predecir
-            family: 'best', 'trees', 'linear', o 'boosting' (KNN eliminado)
+            family: 'best', 'trees', 'linear', o 'boosting'
             model_name: Nombre específico del modelo (ej: 'Random Forest')
             
         Returns:
@@ -1606,8 +1912,6 @@ class ClassificationTrainingPipeline(BaseEstimator):
         
         if 'árbol' in family.lower() or 'tree' in family.lower():
             return self.tree_family.predict(X, model_name=model_name)
-        # elif 'knn' in family.lower():  # COMENTADO - KNN ya no se entrena
-        #     return self.knn_family.predict(X)
         elif 'linear' in family.lower():
             return self.linear_family.predict(X, model_name=model_name)
         elif 'boost' in family.lower():
@@ -1623,8 +1927,6 @@ class ClassificationTrainingPipeline(BaseEstimator):
         
         if 'árbol' in family.lower() or 'tree' in family.lower():
             return self.tree_family.predict_proba(X, model_name=model_name)
-        # elif 'knn' in family.lower():  # COMENTADO - KNN ya no se entrena
-        #     return self.knn_family.predict_proba(X)
         elif 'linear' in family.lower():
             return self.linear_family.predict_proba(X, model_name=model_name)
         elif 'boost' in family.lower():
@@ -1669,23 +1971,58 @@ class ClassificationTrainingPipeline(BaseEstimator):
         output_dir = Path(output_dir)
         output_dir.mkdir(exist_ok=True, parents=True)
         
-        # Guardar comparación
-        comparison_path = output_dir / 'classification_model_comparison.csv'
+        # Guardar comparación de validación
+        comparison_path = output_dir / 'model_comparison_validation.csv'
         self.comparison_df.to_csv(comparison_path, index=False)
         
+        # Guardar comparación de test (si existe)
+        if self.test_comparison_df is not None:
+            test_comparison_path = output_dir / 'model_comparison_test.csv'
+            # Guardar sin las columnas de arrays (predictions, etc)
+            test_df_to_save = self.test_comparison_df.drop(columns=['predictions', 'precision_per_class', 'recall_per_class', 'f1_per_class'])
+            test_df_to_save.to_csv(test_comparison_path, index=False)
+        
+        # Guardar matriz de confusión del mejor modelo (si existe)
+        if self.best_test_model_info is not None:
+            y_pred_best = self.best_test_model_info['predictions']
+            cm = confusion_matrix(self.y_test_cat, y_pred_best)
+            cm_df = pd.DataFrame(cm,
+                                index=[f'Real_{label}' for label in self.target_transformer.labels],
+                                columns=[f'Pred_{label}' for label in self.target_transformer.labels])
+            cm_path = output_dir / 'confusion_matrix_best_model.csv'
+            cm_df.to_csv(cm_path)
+        
         # Guardar resumen en texto
-        summary_path = output_dir / 'classification_training_summary.txt'
+        summary_path = output_dir / 'training_summary.txt'
         with open(summary_path, 'w', encoding='utf-8') as f:
             f.write("=" * 80 + "\n")
             f.write(" RESUMEN DE ENTRENAMIENTO - CLASIFICACIÓN ".center(80) + "\n")
             f.write("=" * 80 + "\n\n")
             
-            f.write("COMPARACIÓN DE MODELOS:\n")
+            f.write("COMPARACIÓN DE MODELOS (VALIDACIÓN):\n")
             f.write(self.comparison_df.to_string(index=False) + "\n\n")
             
-            f.write("MEJOR MODELO:\n")
-            for key, value in self.best_model_info.items():
-                f.write(f"  {key}: {value}\n")
+            if self.test_comparison_df is not None:
+                f.write("\nCOMPARACIÓN DE MODELOS (TEST):\n")
+                test_df_display = self.test_comparison_df[[
+                    'Familia', 'Modelo', 'Accuracy_train', 'Accuracy_test',
+                    'F1_weighted_test', 'F1_macro_test', 'Overfitting_train_test', 'Tiempo_seg'
+                ]]
+                f.write(test_df_display.to_string(index=False) + "\n\n")
+            
+            if self.best_test_model_info:
+                f.write("\nMEJOR MODELO (TEST):\n")
+                f.write(f"  Familia: {self.best_test_model_info['Familia']}\n")
+                f.write(f"  Modelo: {self.best_test_model_info['Modelo']}\n")
+                f.write(f"  Accuracy (train): {self.best_test_model_info['Accuracy_train']:.4f}\n")
+                f.write(f"  Accuracy (test): {self.best_test_model_info['Accuracy_test']:.4f}\n")
+                f.write(f"  F1-weighted (test): {self.best_test_model_info['F1_weighted_test']:.4f}\n")
+                f.write(f"  F1-macro (test): {self.best_test_model_info['F1_macro_test']:.4f}\n")
+                f.write(f"  Overfitting: {self.best_test_model_info['Overfitting_train_test']:.4f}\n")
+            elif self.best_model_info:
+                f.write("\nMEJOR MODELO (VALIDACIÓN):\n")
+                for key, value in self.best_model_info.items():
+                    f.write(f"  {key}: {value}\n")
             
             f.write(f"\nTiempo total: {self.total_time:.2f}s ({self.total_time/60:.2f} min)\n")
             
@@ -1697,8 +2034,12 @@ class ClassificationTrainingPipeline(BaseEstimator):
         
         if self.verbose:
             print(f"\n✓ Resultados guardados en: {output_dir}")
-            print(f"  - {comparison_path.name}")
-            print(f"  - {summary_path.name}")
+            print(f"  ├─ {comparison_path.name}")
+            if self.test_comparison_df is not None:
+                print(f"  ├─ model_comparison_test.csv")
+                if self.best_test_model_info is not None:
+                    print(f"  ├─ confusion_matrix_best_model.csv")
+            print(f"  └─ {summary_path.name}")
     
     def plot_confusion_matrix(self, X, y, family='best', normalize=True, figsize=(10, 8)):
         """
