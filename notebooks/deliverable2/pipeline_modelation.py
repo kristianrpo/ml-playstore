@@ -9,22 +9,18 @@ Familias de modelos incluidas:
 - Lineales: LogisticRegression, SGDClassifier
 - Boosting: XGBoost, CatBoost
 
-NOTA: KNN ha sido removido del pipeline debido a overfitting severo (~27%)
-causado por lazy learning y curse of dimensionality.
-
-OPTIMIZACIÓN: CatBoost usa auto_class_weights='Balanced' para mejorar
-recall de clase minoritaria (Low) maximizando F1-score balanceado.
+OPTIMIZACIÓN: Usa class_weight agresivo (Low=2.5x) y threshold optimization (0.60-0.95)
+para balancear precision/recall en clase minoritaria.
 
 Autor: Sistema de ML
 Fecha: 2025
-Versión: 1.3.0
+Versión: 2.0.0
 
 Dependencias:
 - pandas >= 1.3.0
 - numpy >= 1.21.0
 - scikit-learn >= 1.0.1
 - xgboost >= 1.5.0
-- lightgbm >= 3.3.0
 - catboost >= 1.0.0
 - matplotlib >= 3.4.0
 - seaborn >= 0.11.0
@@ -52,10 +48,8 @@ from sklearn.ensemble import (
     ExtraTreesClassifier,
     GradientBoostingClassifier
 )
-from sklearn.neighbors import KNeighborsClassifier
 from sklearn.linear_model import LogisticRegression, SGDClassifier
 from xgboost import XGBClassifier
-from lightgbm import LGBMClassifier
 from catboost import CatBoostClassifier
 
 # Visualización
@@ -206,7 +200,7 @@ class TargetTransformer(BaseEstimator, TransformerMixin):
                 pct = count / len(y) * 100
                 print(f"  {label}: {count} ({pct:.1f}%)")
         
-        # Convertir a int para compatibilidad con XGBoost/LightGBM
+        # Convertir a int para compatibilidad con modelos de clasificación
         return y_binned.astype(int)
     
     def fit_transform(self, y: pd.Series) -> pd.Series:
@@ -340,12 +334,12 @@ class TreeClassifierFamily(BaseEstimator):
             print("-" * 80)
         
         param_grid_rf = {
-            'n_estimators': [80, 100],  # Reducido más para evitar overfitting
-            'max_depth': [6, 8, 10],  # Profundidades más conservadoras (era 8,10,12,15)
-            'min_samples_split': [15, 20, 25],  # Más conservador (era 10,15,20)
-            'min_samples_leaf': [6, 8, 10],  # Hojas más grandes (era 4,5,8)
+            'n_estimators': [150, 200],  # Más árboles (antes 80,100)
+            'max_depth': [10, 12, 15],  # Árboles más profundos (antes 6,8,10)
+            'min_samples_split': [10, 15],  # Menos conservador (antes 15,20,25)
+            'min_samples_leaf': [4, 6],  # Hojas más pequeñas (antes 6,8,10)
             'max_features': ['sqrt'],  # Mantener sqrt
-            'max_samples': [0.6, 0.7]  # Más agresivo con bagging (era 0.7,0.8)
+            'max_samples': [0.7, 0.8]  # Más datos por árbol (antes 0.6,0.7)
         }
         
         if self.verbose:
@@ -426,11 +420,12 @@ class TreeClassifierFamily(BaseEstimator):
         # Usar class_weight más agresivo
         aggressive_class_weight = {0: 2.5, 1: 1.0}
         
+        # Extra Trees con MÁS complejidad que Random Forest para reducir underfitting
         et_model = ExtraTreesClassifier(
-            n_estimators=best_rf_params['n_estimators'],
-            max_depth=best_rf_params['max_depth'],
-            min_samples_split=best_rf_params['min_samples_split'],
-            min_samples_leaf=best_rf_params['min_samples_leaf'],
+            n_estimators=max(200, best_rf_params['n_estimators'] + 50),  # Más árboles
+            max_depth=best_rf_params['max_depth'] + 2 if best_rf_params['max_depth'] else None,  # Más profundo
+            min_samples_split=max(2, best_rf_params['min_samples_split'] - 5),  # Menos conservador
+            min_samples_leaf=max(1, best_rf_params['min_samples_leaf'] - 2),  # Hojas más pequeñas
             max_features=best_rf_params['max_features'],
             random_state=self.random_state,
             class_weight=aggressive_class_weight,
@@ -568,160 +563,6 @@ class TreeClassifierFamily(BaseEstimator):
         if model_name in self.results and 'feature_importance' in self.results[model_name]:
             return self.results[model_name]['feature_importance'].head(top_n)
         return None
-
-
-
-# ============================================================================
-# FAMILIA KNN: K-Nearest Neighbors - COMENTADO (overfitting 27% por lazy learning)
-# ============================================================================
-
-# class KNNClassifierFamily(BaseEstimator):
-#     """
-#     Familia K-Nearest Neighbors con escalado StandardScaler.
-#     
-#     KNN es sensible a la escala de las features, por lo que requiere
-#     normalización. Se optimizan hiperparámetros con GridSearchCV.
-#     
-#     NOTA: Comentado porque presenta overfitting severo (~27%) debido a:
-#     - Lazy learning: memoriza datos de entrenamiento en lugar de aprender patrones
-#     - Curse of dimensionality con 66 features
-#     - weights='distance' da peso infinito a matches exactos en train
-#     
-#     Ejemplo de uso:
-#         >>> knn_family = KNNClassifierFamily(cv_folds=5, random_state=42)
-#         >>> knn_family.fit(X_train, y_train, X_val, y_val)
-#         >>> predictions = knn_family.predict(X_test)
-#     
-#     Args:
-#         cv_folds: Número de folds para cross-validation (default: 5)
-#         random_state: Semilla para reproducibilidad (default: 42)
-#         n_jobs: Número de cores a usar (-1 usa todos) (default: -1)
-#         verbose: Mostrar información detallada (default: True)
-#     """
-#     
-#     def __init__(self, cv_folds: int = 5, random_state: int = 42,
-#                  n_jobs: int = -1, verbose: bool = True):
-#         self.cv_folds = cv_folds
-#         self.random_state = random_state
-#         self.n_jobs = n_jobs
-#         self.verbose = verbose
-#         
-#         self.scaler = None
-#         self.model = None
-#         self.results = {}
-#     
-#     def fit(self, X_train, y_train, X_val=None, y_val=None) -> 'KNNClassifierFamily':
-#         """Entrena KNN con escalado y optimización de hiperparámetros"""
-#         if self.verbose:
-#             print("\n" + "=" * 80)
-#             print("FAMILIA KNN: K-NEAREST NEIGHBORS".center(80))
-#             print("=" * 80)
-#         
-#         # Escalado
-#         if self.verbose:
-#             print("\n[1/2] Aplicando StandardScaler...")
-#         
-#         self.scaler = StandardScaler()
-#         X_train_scaled = self.scaler.fit_transform(X_train)
-#         X_val_scaled = self.scaler.transform(X_val) if X_val is not None else None
-#         
-#         if self.verbose:
-#             print(f"  ✓ Datos escalados: μ={X_train_scaled.mean():.6f}, σ={X_train_scaled.std():.6f}")
-#         
-#         # GridSearchCV
-#         if self.verbose:
-#             print("\n[2/2] Entrenando KNN con GridSearchCV...")
-#             print("-" * 80)
-#         
-#         param_grid_knn = {
-#             'n_neighbors': [40, 50, 60, 80] ,  # Aumentar vecinos para reducir overfitting (era 3,5,7,11,15)
-#             'weights': ['distance'],  # Solo distance para dar más peso a vecinos cercanos
-#             'metric': ['manhattan'],  # Solo manhattan (funcionó bien antes)
-#             'algorithm': ['auto']  # Solo auto
-#         }
-#         
-#         if self.verbose:
-#             total_knn = (len(param_grid_knn['n_neighbors']) * 
-#                         len(param_grid_knn['weights']) * 
-#                         len(param_grid_knn['metric']) *
-#                         len(param_grid_knn['algorithm']))
-#             print(f"  Combinaciones: {total_knn}")
-#         
-#         start_time = time.time()
-#         
-#         knn_grid = GridSearchCV(
-#             KNeighborsClassifier(n_jobs=self.n_jobs),
-#             param_grid_knn,
-#             cv=StratifiedKFold(n_splits=self.cv_folds, shuffle=True, random_state=self.random_state),
-#             scoring='f1_weighted',
-#             n_jobs=self.n_jobs,
-#             verbose=1 if self.verbose else 0
-#         )
-#         
-#         knn_grid.fit(X_train_scaled, y_train)
-#         train_time = time.time() - start_time
-#         
-#         self.model = knn_grid.best_estimator_
-#         
-#         if self.verbose:
-#             print(f"  ✓ Completado en {train_time:.2f}s")
-#             print(f"  Mejores parámetros: {knn_grid.best_params_}")
-#             print(f"  Mejor CV F1-score: {knn_grid.best_score_:.4f}")
-#         
-#         # Evaluar
-#         if X_val_scaled is not None and y_val is not None:
-#             # Medir tiempo de predicción
-#             pred_start = time.time()
-#             y_pred_val = knn_grid.predict(X_val_scaled)
-#             pred_time = time.time() - pred_start
-#             
-#             y_pred_train = knn_grid.predict(X_train_scaled)
-#             y_proba_val = knn_grid.predict_proba(X_val_scaled)
-#             
-#             self.results['KNN'] = {
-#                 'model': knn_grid.best_estimator_,
-#                 'scaler': self.scaler,
-#                 'best_params': knn_grid.best_params_,
-#                 'accuracy_val': accuracy_score(y_val, y_pred_val),
-#                 'precision_val': precision_score(y_val, y_pred_val, average='weighted', zero_division=0),
-#                 'recall_val': recall_score(y_val, y_pred_val, average='weighted', zero_division=0),
-#                 'f1_val': f1_score(y_val, y_pred_val, average='weighted', zero_division=0),
-#                 'f1_macro_val': f1_score(y_val, y_pred_val, average='macro', zero_division=0),
-#                 'accuracy_train': accuracy_score(y_train, y_pred_train),
-#                 'train_time': train_time,
-#                 'pred_time': pred_time,
-#                 'predictions_val': y_pred_val,
-#                 'probabilities_val': y_proba_val,
-#                 'confusion_matrix': confusion_matrix(y_val, y_pred_val),
-#                 'classification_report': classification_report(y_val, y_pred_val, zero_division=0)
-#             }
-#             
-#             if self.verbose:
-#                 print(f"\n  Métricas en validación:")
-#                 print(f"    Accuracy:  {self.results['KNN']['accuracy_val']:.4f}")
-#                 print(f"    F1-score:  {self.results['KNN']['f1_val']:.4f}")
-#                 print(f"    Tiempo de predicción: {pred_time:.4f}s")
-#                 
-#                 # Advertencia si predicción es lenta
-#                 if pred_time > 1.0:
-#                     print(f"\n  ⚠ ADVERTENCIA: Tiempo de predicción alto ({pred_time:.2f}s)")
-#                     print(f"    Considerar usar algorithm='ball_tree' o reducir n_neighbors")
-#         
-#         return self
-#     
-#     def predict(self, X) -> np.ndarray:
-#         """Predice clases (escala datos automáticamente)"""
-#         X_scaled = self.scaler.transform(X)
-#         return self.model.predict(X_scaled)
-#     
-#     def predict_proba(self, X) -> np.ndarray:
-#         """Predice probabilidades (escala datos automáticamente)"""
-#         X_scaled = self.scaler.transform(X)
-#         return self.model.predict_proba(X_scaled)
-#     
-#     def get_results(self) -> Dict:
-#         """Retorna diccionario con todos los resultados"""
-#         return self.results
 
 
 
@@ -971,15 +812,15 @@ class LinearClassifierFamily(BaseEstimator):
 
 
 # ============================================================================
-# FAMILIA BOOSTING: XGBoost, LightGBM, CatBoost
+# FAMILIA BOOSTING: XGBoost, CatBoost
 # ============================================================================
 
 class BoostingClassifierFamily(BaseEstimator):
     """
     Familia de modelos de boosting avanzados para clasificación.
     
-    Incluye XGBoost, LightGBM y CatBoost con MinMaxScaler.
-    Todos los modelos manejan desbalance de clases automáticamente.
+    Incluye XGBoost y CatBoost con MinMaxScaler.
+    Ambos modelos manejan desbalance de clases automáticamente.
     
     Ejemplo de uso:
         >>> boosting_family = BoostingClassifierFamily(cv_folds=5, random_state=42)
@@ -1008,7 +849,7 @@ class BoostingClassifierFamily(BaseEstimator):
         """Entrena modelos de boosting con escalado"""
         if self.verbose:
             print("\n" + "=" * 80)
-            print("FAMILIA BOOSTING: XGBOOST, CATBOOST, LIGHTGBM".center(80))
+            print("FAMILIA BOOSTING: XGBOOST, CATBOOST".center(80))
             print("=" * 80)
         
         # Combinar train y val para GridSearchCV con PredefinedSplit
@@ -1122,12 +963,12 @@ class BoostingClassifierFamily(BaseEstimator):
             print("-" * 80)
         
         param_grid_catboost = {
-            'iterations': [100, 150],  # Reducido para evitar overfitting
-            'learning_rate': [0.05, 0.08],  # Learning rates conservadores
-            'depth': [4, 5],  # Árboles más simples
-            'l2_leaf_reg': [3, 5, 8],  # Regularización fuerte
-            'subsample': [0.7, 0.8],  # Nuevo: bagging más agresivo
-            'colsample_bylevel': [0.7, 0.8]  # Nuevo: feature sampling
+            'iterations': [250, 300],  # Punto medio (no tan alto como 400)
+            'learning_rate': [0.06, 0.08],  # Learning rates más conservadores
+            'depth': [6, 7],  # Árboles moderadamente profundos
+            'l2_leaf_reg': [1.5, 2.0],  # Regularización moderada (punto medio)
+            'subsample': [0.75, 0.80],  # Submuestreo moderado para reducir overfitting
+            'colsample_bylevel': [0.75, 0.80]  # Feature sampling moderado
         }
         
         if self.verbose:
@@ -1194,84 +1035,6 @@ class BoostingClassifierFamily(BaseEstimator):
                 'classification_report': classification_report(y_val, y_pred_val, zero_division=0)
             }
         
-        # ====================================================================
-        # LIGHTGBM - COMENTADO (muy lento)
-        # ====================================================================
-        # if self.verbose:
-        #     print("\n[2/2] Entrenando LightGBM...")
-        #     print("-" * 80)
-        # 
-        # param_grid_lgb = {
-        #     'n_estimators': [100],  # Reducido de 2 a 1 opción
-        #     'learning_rate': [0.05, 0.1],  # Reducido de 3 a 2 opciones
-        #     'max_depth': [5],  # Reducido de 3 a 1 opción
-        #     'subsample': [0.8],  # Reducido de 2 a 1 opción
-        #     'colsample_bytree': [0.8],  # Reducido de 2 a 1 opción
-        #     'reg_alpha': [0.5],  # Reducido de 2 a 1 opción
-        #     'reg_lambda': [1.0],  # Reducido de 2 a 1 opción
-        #     'min_child_samples': [10]  # Reducido de 2 a 1 opción
-        # }
-        # 
-        # if self.verbose:
-        #     total_lgb = (len(param_grid_lgb['n_estimators']) * 
-        #                 len(param_grid_lgb['learning_rate']) * 
-        #                 len(param_grid_lgb['max_depth']) *
-        #                 len(param_grid_lgb['subsample']) *
-        #                 len(param_grid_lgb['colsample_bytree']) *
-        #                 len(param_grid_lgb['reg_alpha']) *
-        #                 len(param_grid_lgb['reg_lambda']) *
-        #                 len(param_grid_lgb['min_child_samples']))
-        #     print(f"  Combinaciones: {total_lgb}")
-        # 
-        # start_time = time.time()
-        # 
-        # lgb_grid = GridSearchCV(
-        #     LGBMClassifier(
-        #         random_state=self.random_state,
-        #         n_jobs=self.n_jobs,
-        #         class_weight='balanced',
-        #         verbose=-1
-        #     ),
-        #     param_grid_lgb,
-        #     cv=StratifiedKFold(n_splits=self.cv_folds, shuffle=True, random_state=self.random_state),
-        #     scoring='f1_weighted',
-        #     n_jobs=self.n_jobs,
-        #     verbose=1 if self.verbose else 0
-        # )
-        # 
-        # lgb_grid.fit(X_train_scaled, y_train)
-        # lgb_time = time.time() - start_time
-        # 
-        # self.models['LightGBM'] = lgb_grid.best_estimator_
-        # 
-        # if self.verbose:
-        #     print(f"  ✓ Completado en {lgb_time:.2f}s")
-        #     print(f"  Mejores parámetros: {lgb_grid.best_params_}")
-        #     print(f"  Mejor CV F1-score: {lgb_grid.best_score_:.4f}")
-        # 
-        # # Evaluar
-        # if X_val_scaled is not None and y_val is not None:
-        #     y_pred_val = lgb_grid.predict(X_val_scaled)
-        #     y_pred_train = lgb_grid.predict(X_train_scaled)
-        #     y_proba_val = lgb_grid.predict_proba(X_val_scaled)
-        #     
-        #     self.results['LightGBM'] = {
-        #         'model': lgb_grid.best_estimator_,
-        #         'scaler': self.scaler,
-        #         'best_params': lgb_grid.best_params_,
-        #         'accuracy_val': accuracy_score(y_val, y_pred_val),
-        #         'precision_val': precision_score(y_val, y_pred_val, average='weighted', zero_division=0),
-        #         'recall_val': recall_score(y_val, y_pred_val, average='weighted', zero_division=0),
-        #         'f1_val': f1_score(y_val, y_pred_val, average='weighted', zero_division=0),
-        #         'f1_macro_val': f1_score(y_val, y_pred_val, average='macro', zero_division=0),
-        #         'accuracy_train': accuracy_score(y_train, y_pred_train),
-        #         'train_time': lgb_time,
-        #         'predictions_val': y_pred_val,
-        #         'probabilities_val': y_proba_val,
-        #         'confusion_matrix': confusion_matrix(y_val, y_pred_val),
-        #         'classification_report': classification_report(y_val, y_pred_val, zero_division=0)
-        #     }
-        
         # Resumen
         if self.verbose:
             print(f"\n{'=' * 80}")
@@ -1287,15 +1050,19 @@ class BoostingClassifierFamily(BaseEstimator):
         
         return self
     
-    def predict(self, X, model_name: str = 'LightGBM') -> np.ndarray:
+    def predict(self, X, model_name: str = 'XGBoost') -> np.ndarray:
         """Predice clases (escala datos automáticamente)"""
         X_scaled = self.scaler.transform(X)
         return self.models[model_name].predict(X_scaled)
     
-    def predict_proba(self, X, model_name: str = 'LightGBM') -> np.ndarray:
+    def predict_proba(self, X, model_name: str = 'XGBoost') -> np.ndarray:
         """Predice probabilidades (escala datos automáticamente)"""
         X_scaled = self.scaler.transform(X)
         return self.models[model_name].predict_proba(X_scaled)
+    
+    def get_results(self) -> Dict:
+        """Retorna diccionario con todos los resultados"""
+        return self.results
     
     def get_results(self) -> Dict:
         """Retorna diccionario con todos los resultados"""
@@ -1317,10 +1084,7 @@ class ClassificationTrainingPipeline(BaseEstimator):
     1. Transformación del target a categorías
     2. Familia Árboles (RandomForest, ExtraTrees, GradientBoosting)
     3. Familia Lineales (LogisticRegression, SGDClassifier)
-    4. Familia Boosting (XGBoost, LightGBM)
-    
-    NOTA: KNN ha sido eliminado del pipeline debido a overfitting severo (~27%)
-    causado por lazy learning y curse of dimensionality con 66 features.
+    4. Familia Boosting (XGBoost, CatBoost)
     
     Genera comparación automática y selecciona el mejor modelo por F1-score weighted.
     
@@ -1354,7 +1118,7 @@ class ClassificationTrainingPipeline(BaseEstimator):
                  random_state: int = 42,
                  n_jobs: int = -1,
                  verbose: bool = True,
-                 families: List[str] = ['trees', 'knn', 'linear', 'boosting'],
+                 families: List[str] = ['trees', 'linear', 'boosting'],
                  custom_bins: Optional[List[float]] = None,
                  custom_labels: Optional[List[str]] = None):
         self.n_bins = n_bins
@@ -1370,7 +1134,6 @@ class ClassificationTrainingPipeline(BaseEstimator):
         # Componentes
         self.target_transformer = None
         self.tree_family = None
-        self.knn_family = None
         self.linear_family = None
         self.boosting_family = None
         
@@ -1524,29 +1287,7 @@ class ClassificationTrainingPipeline(BaseEstimator):
                     print(f"\n⚠ ERROR en familia Árboles: {str(e)}")
                     print("  Continuando con otras familias...")
         
-        # FAMILIA 2: KNN - COMENTADO (overfitting 27% por lazy learning)
-        # if 'knn' in self.families_to_train:
-        #     family_count += 1
-        #     if self.verbose:
-        #         print("\n" + "=" * 80)
-        #         print(f" [{family_count}/{total_families}] ENTRENANDO FAMILIA KNN ".center(80, "="))
-        #         print("=" * 80)
-        #     
-        #     try:
-        #         self.knn_family = KNNClassifierFamily(
-        #             cv_folds=self.cv_folds,
-        #             random_state=self.random_state,
-        #             n_jobs=self.n_jobs,
-        #             verbose=self.verbose
-        #         )
-        #         self.knn_family.fit(X_train, y_train_cat, X_val, y_val_cat)
-        #         self.all_results['KNN'] = self.knn_family.get_results()
-        #     except Exception as e:
-        #         if self.verbose:
-        #             print(f"\n⚠ ERROR en familia KNN: {str(e)}")
-        #             print("  Continuando con otras familias...")
-        
-        # FAMILIA 3: LINEALES
+        # FAMILIA 2: LINEALES
         if 'linear' in self.families_to_train:
             family_count += 1
             if self.verbose:
@@ -1568,7 +1309,7 @@ class ClassificationTrainingPipeline(BaseEstimator):
                     print(f"\n⚠ ERROR en familia Lineales: {str(e)}")
                     print("  Continuando con otras familias...")
         
-        # FAMILIA 4: BOOSTING
+        # FAMILIA 3: BOOSTING
         if 'boosting' in self.families_to_train:
             family_count += 1
             if self.verbose:
@@ -1745,22 +1486,6 @@ class ClassificationTrainingPipeline(BaseEstimator):
                         'Tiempo_seg': r['train_time']
                     })
         
-        # KNN - COMENTADO (no se entrena más)
-        # if 'KNN' in self.all_results and 'KNN' in self.all_results['KNN']:
-        #     r = self.all_results['KNN']['KNN']
-        #     comparison_data.append({
-        #         'Familia': 'KNN',
-        #         'Modelo': 'KNN',
-        #         'Accuracy_val': r['accuracy_val'],
-        #         'Precision_val': r['precision_val'],
-        #         'Recall_val': r['recall_val'],
-        #         'F1_weighted_val': r['f1_val'],
-        #         'F1_macro_val': r['f1_macro_val'],
-        #         'Accuracy_train': r['accuracy_train'],
-        #         'Overfitting': abs(r['accuracy_train'] - r['accuracy_val']),
-        #         'Tiempo_seg': r['train_time']
-        #     })
-        
         # Lineales
         if 'Linear' in self.all_results:
             for model_name in ['Logistic Regression', 'SGD Classifier']:
@@ -1781,7 +1506,7 @@ class ClassificationTrainingPipeline(BaseEstimator):
         
         # Boosting
         if 'Boosting' in self.all_results:
-            for model_name in ['XGBoost', 'CatBoost', 'LightGBM']:
+            for model_name in ['XGBoost', 'CatBoost']:
                 if model_name in self.all_results['Boosting']:
                     r = self.all_results['Boosting'][model_name]
                     comparison_data.append({
@@ -1946,8 +1671,6 @@ class ClassificationTrainingPipeline(BaseEstimator):
         
         if family == 'Árboles':
             return self.all_results['Trees'][model_name]['model'], self.best_model_info
-        # elif family == 'KNN':  # COMENTADO - KNN ya no se entrena
-        #     return self.all_results['KNN']['KNN']['model'], self.best_model_info
         elif family == 'Lineales':
             return self.all_results['Linear'][model_name]['model'], self.best_model_info
         elif family == 'Boosting':

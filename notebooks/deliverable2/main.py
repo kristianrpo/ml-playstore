@@ -45,7 +45,7 @@ OUTPUT_DIR = Path('./outputs')
 # CONFIGURAR AQUÍ QUÉ FAMILIAS ENTRENAR
 # Opciones: 'trees', 'linear', 'boosting'
 # Se entrenarán Trees y Boosting con hiperparámetros optimizados anti-overfitting
-FAMILIES_TO_TRAIN = ['trees', 'boosting']  # Cambiar según necesidad
+FAMILIES_TO_TRAIN = ['boosting','trees']  # Cambiar según necesidad
 
 # CONFIGURACIÓN PARA CLASIFICACIÓN BINARIA
 N_BINS = 2  # Clasificación binaria: Low vs High
