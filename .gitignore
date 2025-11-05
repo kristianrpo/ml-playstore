@@ -34,3 +34,4 @@ figures/
 
 # Poetry
 .poetry/
+catboost_info/
